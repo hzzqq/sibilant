@@ -132,6 +132,44 @@ eq('eval AST', '(eval (quote (+ 1 2 3)))', 6);
 // ---- 错误行号定位 + 源码片段 ----
 try { run('(+ 1 2)\n(+ 3 4))'); ok('行号: 多余 )', false); }
 catch(e){ ok('行号 多余) 落在行2', e.line === 2); }
+
+// ---- 模块系统 defmodule / require ----
+ok('defmodule+require 全部可用',
+   run('(defmodule mathx (export square dbl) (define (square x) (* x x)) (define (dbl x) (* 2 x))) (require mathx) (and (= (square 5) 25) (= (dbl 3) 6))') === true);
+ok('require 全部导入',
+   run('(defmodule m3 (export x y) (define x 10) (define y 20)) (require m3) (+ x y)') === 30);
+try { run('(defmodule m2 (export a b) (define a 1) (define b 2)) (require m2 a) b'); ok('require 仅挑部分 b 未导入', false); }
+catch(e){ ok('require 仅挑部分 b 未定义', /未定义符号: b/.test(e.message)); }
+try { run('(require nope) 1'); ok('require 未知模块报错', false); }
+catch(e){ ok('require 未知模块抛错', /未定义模块/.test(e.message)); }
+try { run('(defmodule bad (notexport a) (define a 1)) 1'); ok('defmodule 须 (export ...)', false); }
+catch(e){ ok('defmodule 第二参数校验', /defmodule 第二参数须为/.test(e.message)); }
+
+// ---- 集合 Set ----
+ok('set 去重', lispStr(run('(set 1 1 2 3 3)')) === '#{1 2 3}');
+ok('set 空', lispStr(run('(set)')) === '#{}');
+ok('set?', run('(set? (set 1))') === true);
+ok('set? neg', run('(set? (list 1))') === false);
+ok('set-has?', run('(set-has? (set 1 2 3) 2)') === true);
+ok('set-has? neg', run('(set-has? (set 1 2 3) 9)') === false);
+ok('set-add 不可变', run('(let ((s (set 1))) (set-add s 2) (set-len s))') === 1);
+ok('set-add 返回新集', run('(set-len (set-add (set 1) 2))') === 2);
+ok('set-del', run('(set-len (set-del (set 1 2 3) 2))') === 2);
+ok('set->list', lispStr(run('(set->list (set 1 2))')) === '(1 2)');
+ok('set-union', run('(set-len (set-union (set 1 2) (set 2 3)))') === 3);
+ok('set-intersect', run('(set-len (set-intersect (set 1 2 3) (set 2 3 4)))') === 2);
+
+// ---- 报错带文件名 ----
+try { run('(oops 1)', null, 'demo.sib'); ok('文件名: 不应通过', false); }
+catch(e){ ok('文件名 报错信息含 [文件: demo.sib]', /\[文件: demo\.sib\]/.test(e.message)); }
+try { run('(+ 1 2)\n(oops 1)', null, 'mod/f.sib'); ok('文件名+行号: 不应通过', false); }
+catch(e){
+  ok('文件名+行号 含 [文件: mod/f.sib]', /\[文件: mod\/f\.sib\]/.test(e.message));
+  ok('文件名+行号 仍含 【行 2】', /【行 2】/.test(e.message));
+}
+// 不带文件名时不应污染报错信息
+try { run('(oops 1)'); ok('无文件名: 不应通过', false); }
+catch(e){ ok('无文件名 报错不含 [文件:', !/\[文件:/.test(e.message)); }
 try { run('(+ 1 2\n(* 3 4)'); ok('行号: 缺少 )', false); }
 catch(e){ ok('行号 缺少) 落在行1', e.line === 1); }
 try { run('(define (f x) (+ x 1))\n(f y)'); ok('行号: 未定义符号', false); }
@@ -142,6 +180,60 @@ try { run('(oops 1)'); ok('行号: 报错带源码片段', false); }
 catch(e){ ok('行号 报错信息含【行', /【行 \d+】/.test(e.message)); ok('行号 报错信息含 > 片段', /> \(oops 1\)/.test(e.message)); }
 try { run('(error "boom")'); ok('行号: error 内置带行', false); }
 catch(e){ ok('行号 error 内置落在行1', e.line === 1); }
+
+// ---- 深比较 equal? + 标准库 member?/distinct ----
+ok('equal? 列表', run('(equal? (list 1 2 3) (list 1 2 3))') === true);
+ok('equal? 列表 neg', run('(equal? (list 1 2) (list 1 2 3))') === false);
+ok('equal? 嵌套', run('(equal? (list (list 1) 2) (list (list 1) 2))') === true);
+ok('equal? dict', run('(equal? (dict (quote a) 1) (dict (quote a) 1))') === true);
+ok('equal? dict neg', run('(equal? (dict (quote a) 1) (dict (quote a) 2))') === false);
+ok('equal? set', run('(equal? (set 1 2) (set 2 1))') === true);
+ok('equal? sym', run('(equal? (quote foo) (quote foo))') === true);
+ok('equal? struct', run('(equal? (let () (defstruct pt x y) (pt 1 2)) (let () (defstruct pt x y) (pt 1 2)))') === true);
+ok('member?', run('(member? 2 (list 1 2 3))') === true);
+ok('member? neg', run('(member? 9 (list 1 2 3))') === false);
+ok('member? 嵌套', run('(member? (list 1 2) (list (list 9) (list 1 2)))') === true);
+eq('distinct', '(distinct (list 1 1 2 3 3))', [1,2,3]);
+ok('distinct 嵌套', run('(equal? (distinct (list (list 1) (list 1) (list 2))) (list (list 1) (list 2)))') === true);
+
+// ---- 标准库 stdlib（newEnv 自动加载）----
+ok('stdlib identity', run('(identity 5)') === 5);
+eq('stdlib constantly', '((constantly 7) 1 2 3)', 7);
+eq('stdlib compose', '((compose (lambda (x) (* x 2)) (lambda (x) (+ x 1))) 3)', 8);
+eq('stdlib flatten', '(flatten (list 1 (list 2 3) (list (list 4))))', [1,2,3,4]);
+eq('stdlib partition', '(partition 2 (list 1 2 3 4 5))', [[1,2],[3,4],[5]]);
+eq('stdlib take-while', '(take-while (lambda (x) (< x 3)) (list 1 2 3 4))', [1,2]);
+eq('stdlib drop-while', '(drop-while (lambda (x) (< x 3)) (list 1 2 3 4))', [3,4]);
+eq('stdlib sum', '(sum (list 1 2 3 4))', 10);
+eq('stdlib product', '(product (list 1 2 3 4))', 24);
+eq('stdlib last', '(last (list 1 2 3))', 3);
+eq('stdlib butlast', '(butlast (list 1 2 3))', [1,2]);
+ok('stdlib any?', run('(any? even? (list 1 3 4))') === true);
+ok('stdlib any? neg', run('(any? even? (list 1 3 5))') === false);
+ok('stdlib every?', run('(every? even? (list 2 4 6))') === true);
+ok('stdlib every? neg', run('(every? even? (list 2 4 5))') === false);
+eq('stdlib remove', '(remove even? (list 1 2 3 4))', [1,3]);
+eq('stdlib zipmap', '(dict-get (zipmap (list (quote a) (quote b)) (list 1 2)) (quote a))', 1);
+eq('stdlib frequencies', '(dict-get (frequencies (list (quote a) (quote a) (quote b))) (quote a))', 2);
+eq('stdlib interpose', '(interpose 0 (list 1 2 3))', [1,0,2,0,3]);
+
+// ---- 树 tree (n 叉树 LTree：value + children，不可变) ----
+ok('tree?', run('(tree? (tree 1 (leaf 2) (leaf 3)))') === true);
+ok('tree? neg', run('(tree? (list 1 2))') === false);
+eq('leaf value', '(tree-value (leaf 5))', 5);
+eq('tree-value', '(tree-value (tree 1 (leaf 2)))', 1);
+ok('tree-children len', run('(length (tree-children (tree 1 (leaf 2) (leaf 3))))') === 2);
+eq('tree-children values', '(map tree-value (tree-children (tree 1 (leaf 2) (leaf 3))))', [2,3]);
+eq('tree-seq DFS', '(tree-seq (tree 1 (tree 2 (leaf 4)) (leaf 3)))', [1,2,4,3]);
+eq('tree-map', '(tree-seq (tree-map (lambda (x) (* x 10)) (tree 1 (leaf 2) (leaf 3))))', [10,20,30]);
+eq('tree-fold', '(tree-fold + 0 (tree 1 (leaf 2) (leaf 3)))', 6);
+ok('tree-find', run('(tree-value (tree-find (lambda (x) (= x 3)) (tree 1 (leaf 2) (leaf 3))))') === 3);
+ok('tree-find none', run('(tree-find (lambda (x) (= x 9)) (tree 1 (leaf 2)))') === null);
+eq('tree-depth', '(tree-depth (tree 1 (tree 2 (leaf 4)) (leaf 3)))', 3);
+eq('tree-size', '(tree-size (tree 1 (tree 2 (leaf 4)) (leaf 3)))', 4);
+ok('equal? tree', run('(equal? (tree 1 (leaf 2)) (tree 1 (leaf 2)))') === true);
+ok('equal? tree neg', run('(equal? (tree 1 (leaf 2)) (tree 1 (leaf 3)))') === false);
+ok('lispStr tree', lispStr(run('(tree 1 (leaf 2))')) === '#tree(1 #tree(2))');
 
 console.log(`\n[Sibilant smoke] pass=${pass} fail=${fail}`);
 process.exit(fail ? 1 : 0);

@@ -23,13 +23,67 @@ class Dict {
   get len(){ return this.store.size; }
 }
 
+// 集合（Set）：以 lispStr(v) 作键去重，保留原值；不可变语义（set-add/set-del 返回新集合）。
+class LSet {
+  constructor(){ this.m = new Map(); }
+  _clone(){ const s = new LSet(); for(const [k, v] of this.m) s.m.set(k, v); return s; }
+  add(v, mutate){ const s = mutate ? this : this._clone(); s.m.set(lispStr(v), v); return s; }
+  has(v){ return this.m.has(lispStr(v)); }
+  del(v){ const s = this._clone(); s.m.delete(lispStr(v)); return s; }
+  get len(){ return this.m.size; }
+  keys(){ return [...this.m.values()]; }
+}
+
+// 树（n 叉树）：每个节点含 value + children（LTree 数组）。不可变：构造即定型，
+// tree-map / tree-insert 返回新树。用于层级数据、AST、目录树等。
+class LTree {
+  constructor(value, children){ this.value = value; this.children = children || []; }
+}
+function treeMap(f, t){
+  if(!(t instanceof LTree)) throw lispError('tree-map 需要 tree');
+  const kids = t.children.map(c => treeMap(f, c));
+  return new LTree(applyFn(f, [t.value]), kids);
+}
+function treeFold(f, acc, t){
+  if(!(t instanceof LTree)) throw lispError('tree-fold 需要 tree');
+  let a = applyFn(f, [acc, t.value]);
+  for(const c of t.children) a = treeFold(f, a, c);
+  return a;
+}
+function treeSeq(t){
+  if(!(t instanceof LTree)) throw lispError('tree-seq 需要 tree');
+  let r = [t.value];
+  for(const c of t.children) r = r.concat(treeSeq(c));
+  return r;
+}
+function treeFind(pred, t){
+  if(!(t instanceof LTree)) throw lispError('tree-find 需要 tree');
+  if(applyFn(pred, [t.value])) return t;
+  for(const c of t.children){ const r = treeFind(pred, c); if(r) return r; }
+  return null;
+}
+function treeDepth(t){
+  if(!(t instanceof LTree)) throw lispError('tree-depth 需要 tree');
+  if(!t.children.length) return 1;
+  let m = 0; for(const c of t.children) m = Math.max(m, treeDepth(c));
+  return 1 + m;
+}
+function treeSize(t){
+  if(!(t instanceof LTree)) throw lispError('tree-size 需要 tree');
+  let n = 1; for(const c of t.children) n += treeSize(c);
+  return n;
+}
+
 // 运行时调用栈（用于错误回溯）。每次进入/离开一个过程时 push/pop 标签。
 let callStack = [];
+let activeFile = null;            // 当前运行文件的名字（由 run 传入，用于报错定位）
+const modules = Object.create(null);  // 模块注册表：name -> { 导出符号: 值 }
 function lispError(msg, loc){
   const e = new Error(msg);
   e.lisp = true;
   const ln = nodeLine(loc);
   if(ln != null) e.line = ln;        // 报错所在行号
+  if(activeFile) e.file = activeFile; // 报错所在文件
   e.trace = callStack.slice();   // 快照当前调用链
   return e;
 }
@@ -391,6 +445,30 @@ function ev(node, env, tail){
           throw err;
         }
       }
+      case 'defmodule': {
+        const mname = node[1].name;
+        const exportList = node[2];
+        if(!(exportList instanceof Array) || !(exportList[0] instanceof Sym) || exportList[0].name !== 'export')
+          throw lispError('defmodule 第二参数须为 (export ...)', node);
+        const expSyms = exportList.slice(1).map(s => s.name);
+        const me = makeEnv(env);
+        for(let i = 3; i < node.length; i++) ev(node[i], me, false);
+        const mod = {};
+        for(const s of expSyms) mod[s] = me.vars[s];
+        modules[mname] = mod;
+        return new Sym(mname);
+      }
+      case 'require': {
+        const mname = node[1].name;
+        const mod = modules[mname];
+        if(!mod) throw lispError('未定义模块: ' + mname, node);
+        const picks = node.length > 2 ? node.slice(2).map(s => s.name) : Object.keys(mod);
+        for(const s of picks){
+          if(!(s in mod)) throw lispError('模块 ' + mname + ' 未导出: ' + s, node);
+          envSet(env, s, mod[s]);
+        }
+        return new Sym(mname);
+      }
     }
   }
 
@@ -412,6 +490,37 @@ function ev(node, env, tail){
   }
   if(typeof fn === 'function') return applyFn(fn, args, head);
   throw lispError('不是可调用的对象: ' + lispStr(fn), head);
+}
+
+// ---- 深比较：跨 list/dict/set/struct/sym 按值比较（不可变结构语义）----
+function deepEqual(a, b){
+  if(a === b) return true;
+  if(a instanceof Sym || b instanceof Sym) return (a instanceof Sym) && (b instanceof Sym) && a.name === b.name;
+  if(Array.isArray(a) && Array.isArray(b)){
+    if(a.length !== b.length) return false;
+    for(let i = 0; i < a.length; i++) if(!deepEqual(a[i], b[i])) return false;
+    return true;
+  }
+  if(a instanceof Dict && b instanceof Dict){
+    if(a.len !== b.len) return false;
+    for(const k of a.keys()){ if(!b.has(k)) return false; if(!deepEqual(a.get(k), b.get(k))) return false; }
+    return true;
+  }
+  if(a instanceof LSet && b instanceof LSet){
+    if(a.len !== b.len) return false;
+    for(const v of a.keys()) if(!b.has(v)) return false;
+    return true;
+  }
+  if(a instanceof LTree && b instanceof LTree){
+    if(!deepEqual(a.value, b.value)) return false;
+    return deepEqual(a.children, b.children);
+  }
+  if(a && a.__struct && b && b.__struct){
+    if(a.__struct !== b.__struct) return false;
+    for(const k in a.vals) if(!deepEqual(a.vals[k], b.vals[k])) return false;
+    return true;
+  }
+  return false;
 }
 
 // ---- 内置函数 ----
@@ -437,6 +546,7 @@ function setupBuiltins(env){
   def('string?', (x)=> typeof x==='string');
   def('boolean?', (x)=> typeof x==='boolean');
   def('eq?', (a,b)=> a===b);
+  def('equal?', (a,b)=> deepEqual(a,b));
   def('mod', (a,b)=> ((a%b)+b)%b);
   def('sqrt', (a)=> Math.sqrt(a));
   def('abs', (a)=> Math.abs(a));
@@ -486,6 +596,30 @@ function setupBuiltins(env){
   def('dict-keys', (d)=> (d instanceof Dict) ? d.keys() : []);
   def('dict-vals', (d)=> (d instanceof Dict) ? d.vals() : []);
   def('dict-len', (d)=> (d instanceof Dict) ? d.len : 0);
+
+  // ---- 集合 (Set, 以 lispStr 去重，不可变) ----
+  def('set', (...args)=>{ const s = new LSet(); for(const a of args) s.add(a, true); return s; });
+  def('set?', (x)=> x instanceof LSet);
+  def('set-add', (s, v)=> { if(!(s instanceof LSet)) throw lispError('set-add 需要 set'); return s.add(v, false); });
+  def('set-has?', (s, v)=> (s instanceof LSet) ? s.has(v) : false);
+  def('set-del', (s, v)=> { if(!(s instanceof LSet)) throw lispError('set-del 需要 set'); return s.del(v); });
+  def('set-len', (s)=> (s instanceof LSet) ? s.len : 0);
+  def('set->list', (s)=> (s instanceof LSet) ? s.keys() : []);
+  def('set-union', (a, b)=> { if(!(a instanceof LSet) || !(b instanceof LSet)) throw lispError('set-union 需要 set'); const r = a._clone(); for(const v of b.keys()) r.add(v, true); return r; });
+  def('set-intersect', (a, b)=> { if(!(a instanceof LSet) || !(b instanceof LSet)) throw lispError('set-intersect 需要 set'); const r = new LSet(); for(const v of a.keys()) if(b.has(v)) r.add(v, true); return r; });
+
+  // ---- 树 (n 叉树 LTree：value + children，不可变) ----
+  def('tree', (value, ...children)=>{ for(const c of children) if(!(c instanceof LTree)) throw lispError('tree 子节点必须是 tree'); return new LTree(value, children); });
+  def('leaf', (value)=> new LTree(value, []));
+  def('tree?', (x)=> x instanceof LTree);
+  def('tree-value', (t)=>{ if(!(t instanceof LTree)) throw lispError('tree-value 需要 tree'); return t.value; });
+  def('tree-children', (t)=>{ if(!(t instanceof LTree)) throw lispError('tree-children 需要 tree'); return t.children; });
+  def('tree-map', (f, t)=> treeMap(f, t));
+  def('tree-fold', (f, init, t)=> treeFold(f, init, t));
+  def('tree-seq', (t)=> treeSeq(t));
+  def('tree-find', (pred, t)=> treeFind(pred, t));
+  def('tree-depth', (t)=> treeDepth(t));
+  def('tree-size', (t)=> treeSize(t));
 
   // ---- 数值与数学 ----
   def('min', (...a)=> Math.min(...a));
@@ -554,6 +688,31 @@ function setupBuiltins(env){
     return resolveTail(ev(x, newEnv(), true));
   });
   def('error', (msg)=> { throw lispError(typeof msg === 'string' ? msg : lispStr(msg)); });
+
+  // ---- Node 文件 IO / 进程（浏览器环境降级为“不支持”）----
+  def('argv', ()=> (typeof process !== 'undefined' && process.argv) ? process.argv.slice(2).map(String) : []);
+  def('read-file', (p)=> {
+    if(typeof require !== 'function') throw lispError('read-file 仅在 Node 环境可用');
+    return require('fs').readFileSync(String(p), 'utf8');
+  });
+  def('write-file', (p, content)=> {
+    if(typeof require !== 'function') throw lispError('write-file 仅在 Node 环境可用');
+    require('fs').writeFileSync(String(p), String(content), 'utf8');
+    return null;
+  });
+  def('file-exists?', (p)=> {
+    if(typeof require !== 'function') return false;
+    return require('fs').existsSync(String(p));
+  });
+  def('delete-file', (p)=> {
+    if(typeof require !== 'function') throw lispError('delete-file 仅在 Node 环境可用');
+    require('fs').unlinkSync(String(p));
+    return null;
+  });
+  def('exit', (code)=> {
+    if(typeof process !== 'undefined') process.exit(code == null ? 0 : (typeof code === 'number' ? code : (Number(code) || 0)));
+    throw lispError('exit 仅在 Node 环境可用');
+  });
 }
 
 function lispStr(v){
@@ -568,17 +727,48 @@ function lispStr(v){
   if(v && v.__lambda) return '#<lambda>';
   if(v && v.__macro) return '#<macro>';
   if(v instanceof Dict) return '#{' + v.keys().map(k=> lispStr(k) + ' ' + lispStr(v.get(k))).join(' ') + '}';
+  if(v instanceof LSet) return '#{' + v.keys().map(k=> lispStr(k)).join(' ') + '}';
+  if(v instanceof LTree) return '#tree(' + lispStr(v.value) + (v.children.length ? ' ' + v.children.map(lispStr).join(' ') : '') + ')';
   return String(v);
 }
 
+// ---- 标准库（每次 newEnv 自动加载，使用语言自身编写，浏览器/Node 通用）----
+const STDLIB = `
+(define identity (lambda (x) x))
+(define constantly (lambda (x) (lambda (_) x)))
+(define drop (lambda (n xs) (if (or (<= n 0) (null? xs)) xs (drop (- n 1) (cdr xs)))))
+(define compose (lambda (& fs) (lambda (x) (foldl (lambda (acc f) (f acc)) x (reverse fs)))))
+(define flatten (lambda (xs) (foldl (lambda (acc x) (if (list? x) (append acc (flatten x)) (append acc (list x)))) (list) xs)))
+(define partition (lambda (n xs) (if (null? xs) (list) (cons (take xs n) (partition n (drop n xs))))))
+(define take-while (lambda (p xs) (if (or (null? xs) (not (p (car xs)))) (list) (cons (car xs) (take-while p (cdr xs))))))
+(define drop-while (lambda (p xs) (if (or (null? xs) (not (p (car xs)))) xs (drop-while p (cdr xs)))))
+(define sum (lambda (xs) (foldl + 0 xs)))
+(define product (lambda (xs) (foldl * 1 xs)))
+(define last (lambda (xs) (if (null? (cdr xs)) (car xs) (last (cdr xs)))))
+(define butlast (lambda (xs) (if (null? (cdr xs)) (list) (cons (car xs) (butlast (cdr xs))))))
+(define any? (lambda (p xs) (if (null? xs) #f (if (p (car xs)) #t (any? p (cdr xs))))))
+(define every? (lambda (p xs) (if (null? xs) #t (if (not (p (car xs))) #f (every? p (cdr xs))))))
+(define remove (lambda (p xs) (filter (lambda (x) (not (p x))) xs)))
+(define zipmap (lambda (ks vs) (foldl (lambda (d kv) (dict-set d (car kv) (car (cdr kv)))) (dict) (zip ks vs))))
+(define frequencies (lambda (xs) (foldl (lambda (d x) (dict-set d x (+ (dict-get d x 0) 1))) (dict) xs)))
+(define interpose (lambda (sep xs) (if (or (null? xs) (null? (cdr xs))) xs (cons (car xs) (cons sep (interpose sep (cdr xs)))))))
+(define member? (lambda (x xs) (if (null? xs) #f (if (equal? x (car xs)) #t (member? x (cdr xs))))))
+(define distinct (lambda (xs) (foldl (lambda (acc x) (if (member? x acc) acc (append acc (list x)))) (list) xs)))
+`;
+function bootstrapStdlib(env){
+  const exprs = parseAll(STDLIB);
+  for(const ex of exprs) resolveTail(ev(ex, env, true));
+}
+
 // ---- 对外 API ----
-function newEnv(){ const e = makeEnv(null); setupBuiltins(e); return e; }
+function newEnv(){ const e = makeEnv(null); setupBuiltins(e); bootstrapStdlib(e); return e; }
 function srcLineAt(src, line){
   const parts = src.split('\n');
   return (line >= 1 && line <= parts.length) ? parts[line-1].trim() : '';
 }
-function run(src, env){
+function run(src, env, filename){
   env = env || newEnv();
+  activeFile = filename || null;
   const exprs = parseAll(src);
   let r = null;
   try {
@@ -586,6 +776,7 @@ function run(src, env){
   } catch(err){
     if(err && err.lisp){
       let msg = err.message;
+      if(activeFile) msg = '[文件: ' + activeFile + '] ' + msg;
       if(err.line != null){
         const snip = srcLineAt(src, err.line);
         msg = '【行 ' + err.line + '】' + msg + (snip ? '\n    > ' + snip : '');
