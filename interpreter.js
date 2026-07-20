@@ -74,6 +74,22 @@ function treeSize(t){
   return n;
 }
 
+// 惰性求值：delay 产出的“承诺(promise)”——捕获表达式与环境，force 时才求值且只求值一次。
+class LPromise {
+  constructor(expr, env){ this.expr = expr; this.env = env; this.forced = false; this.val = undefined; }
+}
+// 惰性序列（stream）：头部立即求值，尾部是一个 promise（force 后给出下一个 LStream 或 null）。
+class LStream {
+  constructor(head, tailPromise){ this.head = head; this.tail = tailPromise; }
+}
+function forcePromise(p){
+  if(!(p instanceof LPromise)) return p;        // force 非 promise 对象 → 原样返回
+  if(p.forced) return p.val;                    // 记忆化：只求值一次
+  const r = resolveTail(ev(p.expr, p.env, true));
+  p.val = r; p.forced = true;
+  return r;
+}
+
 // 运行时调用栈（用于错误回溯）。每次进入/离开一个过程时 push/pop 标签。
 let callStack = [];
 let activeFile = null;            // 当前运行文件的名字（由 run 传入，用于报错定位）
@@ -322,6 +338,10 @@ function ev(node, env, tail){
     const name = head.name;
     switch(name){
       case 'quote': return node[1];
+      case 'delay':
+        return new LPromise(node[1], env);
+      case 'lazy-cons':
+        return new LStream(ev(node[1], env, false), new LPromise(node[2], env));
       case 'quasiquote': return ev(qq(node[1]), env, tail);
       case 'if': {
         const t = ev(node[1], env, false);
@@ -529,7 +549,10 @@ function setupBuiltins(env){
   def('+', (...a)=> a.reduce((x,y)=>x+y, 0));
   def('-', (a,...r)=> r.length ? r.reduce((x,y)=>x-y, a) : -a);
   def('*', (...a)=> a.reduce((x,y)=>x*y, 1));
-  def('/', (a,...r)=> r.length ? r.reduce((x,y)=>x/y, a) : 1/a);
+  def('/', (a,...r)=>{
+    if(r.length){ if(r.some(y => y === 0)) throw lispError('除以零'); return r.reduce((x,y)=>x/y, a); }
+    if(a === 0) throw lispError('除以零'); return 1/a;
+  });
   def('=', (a,b)=> a===b);
   def('<', (a,b)=> a<b); def('>', (a,b)=> a>b);
   def('<=', (a,b)=> a<=b); def('>=', (a,b)=> a>=b);
@@ -547,7 +570,7 @@ function setupBuiltins(env){
   def('boolean?', (x)=> typeof x==='boolean');
   def('eq?', (a,b)=> a===b);
   def('equal?', (a,b)=> deepEqual(a,b));
-  def('mod', (a,b)=> ((a%b)+b)%b);
+  def('mod', (a,b)=> { if(b===0) throw lispError('mod: 除以零'); return ((a%b)+b)%b; });
   def('sqrt', (a)=> Math.sqrt(a));
   def('abs', (a)=> Math.abs(a));
   def('print', (...a)=> a.map(lispStr).join(' '));
@@ -562,6 +585,23 @@ function setupBuiltins(env){
   def('foldl', (f, init, l)=> Array.isArray(l) ? l.reduce((a,x)=>applyFn(f,[a,x]), init) : init);
   def('foldr', (f, init, l)=> Array.isArray(l) ? l.reduceRight((a,x)=>applyFn(f,[x,a]), init) : init);
   def('for-each', (f, l)=>{ if(Array.isArray(l)) l.forEach(x=>applyFn(f,[x])); return null; });
+  // memoize：记忆化高阶函数，按参数元组(序列化)缓存结果，重复调用直接返回缓存
+  def('memoize', (f)=>{
+    const cache = new Map();
+    const mf = (...args)=>{
+      const k = args.map(a => lispStr(a)).join('\u0001');
+      if(cache.has(k)) return cache.get(k);
+      const r = applyFn(f, args);
+      cache.set(k, r);
+      return r;
+    };
+    mf.__memoCache = cache;
+    return mf;
+  });
+  // memoized?：判断对象是否为 memoize 产生的记忆化函数
+  def('memoized?', (f)=> !!(f && f.__memoCache));
+  // memo-cache-size：返回记忆化函数当前缓存条目数（便于测试/调试）
+  def('memo-cache-size', (f)=> (f && f.__memoCache) ? f.__memoCache.size : 0);
   def('zip', (...ls)=>{
     let n = Infinity;
     for(const l of ls){ if(!Array.isArray(l)){ n = 0; break; } n = Math.min(n, l.length); }
@@ -635,6 +675,35 @@ function setupBuiltins(env){
   def('tan', (a)=> Math.tan(a));
   def('pi', Math.PI);
 
+  // ---- 数值与数学（扩容）----
+  // gcd / lcm：整数最大公约 / 最小公倍（0 与任何数 gcd=该数绝对值，lcm=0）
+  def('gcd', (a,b)=>{
+    a = Math.trunc(a); b = Math.trunc(b);
+    a = Math.abs(a); b = Math.abs(b);
+    while(b){ const t = b; b = a % b; a = t; }
+    return a;
+  });
+  def('lcm', (a,b)=>{
+    a = Math.trunc(a); b = Math.trunc(b);
+    if(a === 0 || b === 0) return 0;
+    const g = (function gcd(x,y){ x=Math.abs(x); y=Math.abs(y); while(y){ const t=y; y=x%y; x=t; } return x; })(a,b);
+    return Math.abs(a*b) / g;
+  });
+  // signum：符号（-1 / 0 / 1）
+  def('signum', (a)=> a > 0 ? 1 : (a < 0 ? -1 : 0));
+  // 整数除法：floor-div 向负无穷、quotient 向零截断；除零抛错
+  def('floor-div', (a,b)=>{ if(b === 0) throw lispError('floor-div: 除以零'); return Math.floor(a / b); });
+  def('quotient', (a,b)=>{ if(b === 0) throw lispError('quotient: 除以零'); return Math.trunc(a / b); });
+  // random-int：随机整数，单参 [0,n)、双参 [a,b]（含端点）
+  def('random-int', (a,b)=>{
+    if(b === undefined){ b = a; a = 0; }
+    a = Math.ceil(a); b = Math.floor(b);
+    if(a > b) throw lispError('random-int: 区间无效 a>b');
+    return a + Math.floor(Math.random() * (b - a + 1));
+  });
+  // 整数谓词（3.0 视为整数）
+  def('integer?', (x)=> typeof x === 'number' && Number.isInteger(x));
+
   // ---- 谓词 ----
   def('even?', (a)=> a % 2 === 0);
   def('odd?', (a)=> Math.abs(a % 2) === 1);
@@ -676,6 +745,22 @@ function setupBuiltins(env){
   def('reverse', (l)=> Array.isArray(l) ? l.slice().reverse() : []);
   def('take', (l, n)=> Array.isArray(l) ? l.slice(0, n) : []);
   def('nth', (l, i)=> Array.isArray(l) ? (l[i] ?? null) : null);
+
+  // ---- 惰性求值：delay / force / promise? ----
+  def('force', (p)=> forcePromise(p));
+  def('promise?', (x)=> x instanceof LPromise);
+  // ---- 惰性序列：lazy-cons / lazy-car / lazy-cdr / lazy-null? / lazy-take ----
+  def('lazy-car', (s)=> (s instanceof LStream) ? s.head : (Array.isArray(s) ? (s[0] ?? null) : null));
+  def('lazy-cdr', (s)=> (s instanceof LStream) ? forcePromise(s.tail) : (Array.isArray(s) ? s.slice(1) : null));
+  def('lazy-null?', (s)=> s === null || (Array.isArray(s) && s.length === 0));
+  def('lazy-take', (n, s)=>{
+    const r = []; let cur = s; let k = 0;
+    while(k < n && cur !== null && !(Array.isArray(cur) && cur.length === 0)){
+      if(!(cur instanceof LStream)){ r.push(cur); break; }
+      r.push(cur.head); cur = forcePromise(cur.tail); k++;
+    }
+    return r;
+  });
 
   // ---- 元编程 / 错误 ----
   def('eval', (x)=> {
@@ -728,6 +813,8 @@ function lispStr(v){
   if(v && v.__macro) return '#<macro>';
   if(v instanceof Dict) return '#{' + v.keys().map(k=> lispStr(k) + ' ' + lispStr(v.get(k))).join(' ') + '}';
   if(v instanceof LSet) return '#{' + v.keys().map(k=> lispStr(k)).join(' ') + '}';
+  if(v instanceof LPromise) return '#<promise>';
+  if(v instanceof LStream) return '#<lazy-list>';
   if(v instanceof LTree) return '#tree(' + lispStr(v.value) + (v.children.length ? ' ' + v.children.map(lispStr).join(' ') : '') + ')';
   return String(v);
 }

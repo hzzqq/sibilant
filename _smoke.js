@@ -235,5 +235,54 @@ ok('equal? tree', run('(equal? (tree 1 (leaf 2)) (tree 1 (leaf 2)))') === true);
 ok('equal? tree neg', run('(equal? (tree 1 (leaf 2)) (tree 1 (leaf 3)))') === false);
 ok('lispStr tree', lispStr(run('(tree 1 (leaf 2))')) === '#tree(1 #tree(2))');
 
+// ---- 惰性求值：delay / force / promise? ----
+ok('promise?', run('(promise? (delay 1))') === true);
+ok('promise? neg', run('(promise? 1)') === false);
+ok('force', run('(force (delay (+ 1 2)))') === 3);
+ok('force 非 promise 原样返回', run('(force 5)') === 5);
+ok('delay 惰性：未 force 不求值', run('(let ((side 0)) (delay (set! side (+ side 1))) side)') === 0);
+ok('delay 记忆化：只求值一次', run('(let ((c 0)) (define p (delay (begin (set! c (+ c 1)) 42))) (force p) (force p) c)') === 1);
+ok('delay 返回值', run('(let ((c 0)) (define p (delay (begin (set! c (+ c 1)) 42))) (force p))') === 42);
+// 惰性序列（stream）
+ok('lazy-cons/take 2', lispStr(run('(lazy-take 2 (lazy-cons 1 (lazy-cons 2 (lazy-cons 3 (quote ())))))')) === '(1 2)');
+ok('lazy-cons/take 全', lispStr(run('(lazy-take 5 (lazy-cons 1 (lazy-cons 2 (lazy-cons 3 (quote ())))))')) === '(1 2 3)');
+ok('lazy-car', run('(lazy-car (lazy-cons 1 (quote ())))') === 1);
+ok('lazy-cdr', run('(lazy-car (lazy-cdr (lazy-cons 1 (lazy-cons 2 (quote ())))))') === 2);
+ok('lazy-null?', run('(lazy-null? (quote ()))') === true);
+ok('lazy-null? neg', run('(lazy-null? (lazy-cons 1 (quote ())))') === false);
+// 无限流：自然数（只取前 N 个，证明惰性生效）
+ok('lazy 无限流 take', lispStr(run('(let () (define nat (lambda (n) (lazy-cons n (nat (+ n 1))))) (lazy-take 5 (nat 1)))')) === '(1 2 3 4 5)');
+
+// memoize 记忆化高阶函数
+ok('memoized? 真', run('(memoized? (memoize (lambda (x) x)))') === true);
+ok('memoized? 否', run('(memoized? (lambda (x) x))') === false);
+ok('memoize 结果正确', run('(let ((g (memoize (lambda (x) (* x 2))))) (g 21))') === 42);
+ok('memoize 相同参数只缓存一次', run('(let ((g (memoize (lambda (x) (* x x))))) (g 3) (g 3) (g 4) (memo-cache-size g))') === 2);
+ok('memoize 不同参数顺序视为不同键', run('(let ((g (memoize (lambda (a b) (list a b))))) (g 1 2) (g 1 2) (g 2 1) (memo-cache-size g))') === 2);
+// 记忆化加速 fib（大数仍可行，证明重复子问题被缓存）—— 用 define+set! 让闭包可见自身
+ok('memoize fib 大数', run('(let () (define fib 0) (set! fib (memoize (lambda (n) (if (< n 2) n (+ (fib (- n 1)) (fib (- n 2))))))) (fib 25))') === 75025);
+
+// ---- 数值与数学库扩容：gcd/lcm/signum/floor-div/quotient/random-int/integer? + 除零保护 ----
+ok('gcd 12 18 = 6', run('(gcd 12 18)') === 6);
+ok('gcd 含 0 = 绝对值', run('(gcd 0 7)') === 7 && run('(gcd 0 -9)') === 9);
+ok('lcm 4 6 = 12', run('(lcm 4 6)') === 12);
+ok('lcm 含 0 = 0', run('(lcm 0 5)') === 0);
+ok('signum 正', run('(signum 3.5)') === 1);
+ok('signum 负', run('(signum -2)') === -1);
+ok('signum 零', run('(signum 0)') === 0);
+ok('floor-div 7 3 = 2', run('(floor-div 7 3)') === 2);
+ok('floor-div -7 3 = -3 (向负无穷)', run('(floor-div -7 3)') === -3);
+ok('quotient 7 3 = 2', run('(quotient 7 3)') === 2);
+ok('quotient -7 3 = -2 (向零截断)', run('(quotient -7 3)') === -2);
+ok('integer? 整数', run('(integer? 7)') === true);
+ok('integer? 浮点否', run('(integer? 7.5)') === false);
+ok('除零被拦截 (/)', run('(try (/ 1 0) (catch e 999))') === 999);
+ok('除零被拦截 (mod)', run('(try (mod 5 0) (catch e 999))') === 999);
+ok('除零被拦截 (floor-div)', run('(try (floor-div 5 0) (catch e 999))') === 999);
+// random-int 边界（多采样确保在 [a,b] 内）
+let riOK = true; for(let i=0;i<200;i++){ const v = run('(random-int 3 8)'); if(typeof v!=='number' || v<3 || v>8) riOK = false; }
+ok('random-int 3 8 落在 [3,8]', riOK);
+ok('random-int 单参 [0,n)', run('(let ((v (random-int 5))) (and (>= v 0) (< v 5)))') === true);
+
 console.log(`\n[Sibilant smoke] pass=${pass} fail=${fail}`);
 process.exit(fail ? 1 : 0);
