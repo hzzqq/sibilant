@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<title>Sibilant · 自研 Lisp 解释器 REPL</title>
+<style>
+  :root{ --bg:#0a0c10; --panel:#0e1118; --line:#1f2730; --txt:#cdd6e0; --accent:#c792ea; --num:#f78c6c; --str:#c3e88d; }
+  *{box-sizing:border-box;}
+  html,body{margin:0;height:100%;background:var(--bg);color:var(--txt);
+    font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;overflow:hidden;}
+  #app{display:flex;height:100%;}
+  #side{width:230px;background:var(--panel);border-right:1px solid var(--line);padding:18px 14px;overflow-y:auto;}
+  #side h1{font-size:15px;margin:0 0 2px;color:var(--accent);}
+  #side .sub{font-size:11px;color:#6b7888;margin-bottom:14px;}
+  #side .ex{font-size:12px;color:#9fb0c0;margin-bottom:10px;line-height:1.5;}
+  #side button{width:100%;text-align:left;background:#141a22;color:var(--txt);border:1px solid var(--line);
+    border-radius:6px;padding:8px 10px;font:inherit;cursor:pointer;margin-bottom:8px;transition:.15s;font-size:12px;}
+  #side button:hover{border-color:var(--accent);color:var(--accent);}
+  #repl{flex:1;display:flex;flex-direction:column;}
+  #out{flex:1;overflow-y:auto;padding:16px 20px;font-size:14px;line-height:1.7;}
+  #out .line{white-space:pre-wrap;word-break:break-word;}
+  #out .in{color:#6b7888;}
+  #out .in b{color:var(--accent);}
+  #out .res{color:var(--str);}
+  #out .err{color:#ff5370;}
+  #inputbar{padding:12px 20px;border-top:1px solid var(--line);display:flex;gap:10px;align-items:flex-start;}
+  #inputbar .prompt{color:var(--accent);font-size:15px;padding-top:6px;}
+  #code{flex:1;background:#0c0f14;color:var(--txt);border:1px solid var(--line);border-radius:6px;
+    padding:8px 10px;font:inherit;font-size:14px;resize:none;height:38px;line-height:1.5;outline:none;}
+  #code:focus{border-color:var(--accent);}
+  .hint{font-size:11px;color:#6b7888;line-height:1.6;margin-top:14px;border-top:1px solid var(--line);padding-top:12px;}
+  code{color:#9fb0c0;}
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="side">
+    <h1>Sibilant</h1>
+    <div class="sub">自研 Lisp 方言 · 解释器 REPL</div>
+    <div class="ex">点示例直接灌入解释器：</div>
+    <button data-ex="(define (fact n) (if (= n 0) 1 (* n (fact (- n 1)))))\n(fact 10)">递归 · 阶乘</button>
+    <button data-ex="(define (fib n) (if (< n 2) n (+ (fib (- n 1)) (fib (- n 2)))))\n(fib 15)">递归 · 斐波那契</button>
+    <button data-ex="(map (lambda (x) (* x x)) (range 12))">高阶函数 · map</button>
+    <button data-ex="(reduce + 0 (filter (lambda (x) (= (mod x 2) 0)) (range 20)))">filter + reduce</button>
+    <button data-ex="(define sq (lambda (x) (* x x)))\n(list (sq 3) (sq 4) (sq 5))">lambda 与 list</button>
+    <button data-ex="(let ((a 10) (b 20)) (+ a b (* a b)) )">let 局部绑定</button>
+    <button data-ex="(defmacro when (test & body) `(if ,test (begin ,@body)))\n(define x 7)\n(when (> x 3) (print &quot;x 大于 3&quot;) 'yes)">宏 · when (quasiquote)</button>
+    <button data-ex="(define (sum n acc) (if (= n 0) acc (sum (- n 1) (+ acc n))))\n(sum 100000 0)">尾递归 · 十万次累加</button>
+    <button data-ex="(define (a x) (+ 0 (b x)))\n(define (b x) (+ 0 (c x)))\n(define (c x) (oops x))\n(a 5)">错误回溯 · 调用栈</button>
+    <button data-ex="(define f (x) (+ x 1))\n(f y)">错误定位 · 行号+源码片段</button>
+    <button data-ex="(try (/ 1 0) (catch e (string-append &quot;出错: &quot; e)))">异常处理 · try/catch</button>
+    <button data-ex="(eval &quot;(define (sq x) (* x x)) (sq 9)&quot;)">元编程 · eval</button>
+    <button data-ex="(define r 5)\n(string-append &quot;半径&quot; (substring (string-append (lispStr r) &quot;&quot;) 0 99) &quot; 的圆面积≈&quot; (substring (string-append (lispStr (round (* pi r r))) &quot;&quot;) 0 99))">数学 · 字符串拼接</button>
+    <div class="hint">
+      词法分析 → 递归下降解析 → 树遍历求值 + 闭包作用域。<br>
+      支持 <code>define lambda if let cond and or set! quote quasiquote</code> 及列表原语。<br>
+      <b>宏</b>：<code>defmacro</code> + `` ` `` 反引号 / <code>,</code> 反引用 / <code>,@</code> 反引用拼接 / <code>&amp;</code> 变参。<br>
+      <b>尾递归优化</b>：尾部自我调用由 trampoline 展开，不增长调用栈（见“十万次累加”示例）。<br>
+      <b>错误回溯</b>：运行时异常携带调用链（见“错误回溯 · 调用栈”示例）；尾调用链会被压平。<br>
+      <b>错误定位</b>：解析/运行时报错会标注 <code>【行 N】</code> 并回显该行源码片段（见“错误定位 · 行号+源码片段”示例），便于快速排查。<br>
+      <b>异常</b>：<code>try</code> / <code>catch</code> 捕获错误并绑定信息；<code>error</code> 主动抛错；<code>eval</code> 求值字符串或 AST。
+      多行可用 Shift+Enter，Enter 求值。
+    </div>
+  </div>
+  <div id="repl">
+    <div id="out"></div>
+    <div id="inputbar">
+      <span class="prompt">&gt;</span>
+      <textarea id="code" placeholder="输入 Sibilant 表达式，Enter 求值…" spellcheck="false"></textarea>
+    </div>
+  </div>
+</div>
+<script src="./interpreter.js"></script>
+<script>
+const out = document.getElementById('out');
+const code = document.getElementById('code');
+const env = Sibilant.newEnv();
+const history = []; let hIdx = -1;
+
+function print(html, cls){
+  const div = document.createElement('div');
+  div.className = 'line ' + (cls||'');
+  div.innerHTML = html;
+  out.appendChild(div);
+  out.scrollTop = out.scrollHeight;
+}
+function esc(s){ return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+function evaluate(src){
+  print('<span class="in"><b>&gt;</b> ' + esc(src.replace(/\n/g,' ')) + '</span>');
+  try{
+    const r = Sibilant.run(src, env);
+    print('<span class="res">' + esc(Sibilant.lispStr(r)) + '</span>');
+  }catch(e){
+    print('<span class="err">⚠ ' + esc(e.message) + '</span>');
+  }
+}
+
+code.addEventListener('keydown', e=>{
+  if(e.key === 'Enter' && !e.shiftKey){
+    e.preventDefault();
+    const src = code.value.trim();
+    if(!src) return;
+    history.push(src); hIdx = history.length;
+    evaluate(src);
+    code.value = '';
+    code.style.height = '38px';
+  } else if(e.key === 'ArrowUp'){
+    if(hIdx > 0){ hIdx--; code.value = history[hIdx]; }
+    e.preventDefault();
+  } else if(e.key === 'ArrowDown'){
+    if(hIdx < history.length-1){ hIdx++; code.value = history[hIdx]; }
+    else { hIdx = history.length; code.value = ''; }
+    e.preventDefault();
+  }
+});
+code.addEventListener('input', ()=>{
+  code.style.height = '38px';
+  code.style.height = Math.min(code.scrollHeight, 160) + 'px';
+});
+
+document.querySelectorAll('[data-ex]').forEach(b=>{
+  b.onclick = ()=>{ evaluate(b.dataset.ex); };
+});
+
+print('<span class="in"><b>Sibilant</b> 已就绪。试着点左侧示例，或自己写点东西。</span>');
+</script>
+</body>
+</html>

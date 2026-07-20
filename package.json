@@ -1,0 +1,15 @@
+{
+  "name": "sibilant",
+  "version": "1.0.0",
+  "description": "Sibilant — 自研 Lisp 方言解释器（手写词法/解析/求值 + 宏 + TCO + 行号定位）",
+  "main": "interpreter.js",
+  "scripts": {
+    "repl": "python -m http.server 8080",
+    "start": "python -m http.server 8080",
+    "test": "node _smoke.js"
+  },
+  "keywords": ["lisp", "interpreter", "scheme", "macro", "tco", "repl", "quasiquote"],
+  "author": "hzzqq",
+  "license": "MIT",
+  "engines": { "node": ">=16" }
+}
