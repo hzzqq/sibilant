@@ -108,6 +108,29 @@ eq('loop-tco', '(loop f ((n 100000) (acc 0)) (if (= n 0) acc (f (- n 1) (+ acc n
 eq('let*', '(let* ((a 1) (b (+ a 1)) (c (+ a b))) (+ a b c))', 6);
 eq('let* shadow', '(let* ((x 1) (x (+ x 10))) x)', 11);
 
+// ---- while / for 循环（ci75）----
+eq('while 累加 1..n', '(let ((i 1) (s 0)) (while (<= i 5) (set! s (+ s i)) (set! i (+ i 1))) s)', 15);
+eq('while 不执行返回 null', '(let ((i 0)) (while (> i 5) (set! i (+ i 1))) i)', 0);
+eq('while 条件终值', '(let ((i 0)) (while (< i 3) (set! i (+ i 1))) i)', 3);
+eq('for 遍历求和', '(let ((s 0)) (for x (list 1 2 3 4) (set! s (+ s x))) s)', 10);
+ok('for 绑定变量可见', run('(let ((acc (list))) (for y (list 10 20) (set! acc (cons y acc))) (equal? acc (list 20 10)))') === true);
+eq('for 空列表返回 null', '(for z (list) 99)', null);
+eq('for 嵌套笛卡尔积', '(let ((s 0)) (for a (list 1 2) (for b (list 3 4) (set! s (+ s (* a b))))) s)', 21);
+
+// ---- par / await 轻量并发（ci80）----
+ok('par 返回 future 列表', run('(promise? (car (par (+ 1 2))))') === true);
+eq('par+await 列表求值', '(await (par (+ 1 2) (* 3 4)))', [3, 12]);
+eq('par+await 单 future 经 car', '(car (await (par (* 6 7))))', 42);
+ok('par+await 顺序无关(均为延迟求值)', lispStr(run('(await (par (- 10 4) (/ 8 2)))')) === '(6 4)');
+ok('await 直接值原样返回', run('(await 99)') === 99);
+
+// ---- time / with-time 计时（ci83）----
+ok('time 返回 2 元素列表', run('(length (time (+ 1 2)))') === 2);
+ok('time 值部分正确', run('(car (time (+ 1 2)))') === 3);
+ok('time 毫秒部分为非负', run('(car (cdr (time (+ 1 2))))') >= 0);
+ok('with-time 返回值', run('(with-time (* 3 4))') === 12);
+ok('time 重计算耗时 >= 轻量', run('(car (cdr (time (let ((s 0)) (for i (range 1 800) (set! s (+ s i))) s))))') >= run('(car (cdr (time 1)))'));
+
 // ---- letrec 互递归 + case 分发 ----
 eq('letrec even/odd', '(letrec ((even? (lambda (n) (if (= n 0) #t (odd? (- n 1))))) (odd? (lambda (n) (if (= n 0) #f (even? (- n 1)))))) (even? 10))', true);
 eq('letrec odd', '(letrec ((even? (lambda (n) (if (= n 0) #t (odd? (- n 1))))) (odd? (lambda (n) (if (= n 0) #f (even? (- n 1)))))) (odd? 7))', true);

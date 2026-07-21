@@ -420,6 +420,55 @@ function ev(node, env, tail){
         }
         return null;
       }
+      case 'while': {
+        let r = null;
+        for(;;){
+          const t = ev(node[1], env, false);
+          if(t === false || t === null) return r;
+          for(let i = 2; i < node.length; i++) r = ev(node[i], env, false);
+        }
+      }
+      case 'for': {
+        // (for <var> <list-expr> <body> ...) — 遍历列表，每次绑定 var 后执行 body
+        if(!(node[1] instanceof Sym)) throw lispError('for 第一参数须为变量名', node);
+        const varName = node[1].name;
+        const seq = ev(node[2], env, false);
+        const arr = Array.isArray(seq) ? seq : [];
+        let r = null;
+        for(const item of arr){
+          const ne = makeEnv(env);
+          ne.vars[varName] = item;
+          for(let i = 3; i < node.length; i++) r = ev(node[i], ne, false);
+        }
+        return r;
+      }
+      case 'par': {
+        // (par expr1 expr2 ...) — 把每个子表达式包装成延迟求值的 LPromise(future)，返回 future 列表
+        const futures = [];
+        for(let i = 1; i < node.length; i++) futures.push(new LPromise(node[i], env));
+        return futures;
+      }
+      case 'await': {
+        // (await futures) — 强制求值 par 产生的 future（列表或单个），返回结果列表/值
+        const f = ev(node[1], env, false);
+        if(Array.isArray(f)) return f.map(x => forcePromise(x));
+        return forcePromise(f);
+      }
+      case 'time': {
+        // (time expr) — 求值 expr 并返回 [值, 毫秒]（求值耗时，精确到 ms）
+        const t0 = Date.now();
+        const v = ev(node[1], env, true);
+        const ms = Date.now() - t0;
+        return [v, ms];
+      }
+      case 'with-time': {
+        // (with-time expr) — 求值 expr 并打印耗时（控制台），返回 expr 的值
+        const t0 = Date.now();
+        const v = ev(node[1], env, true);
+        const ms = Date.now() - t0;
+        if(typeof console !== 'undefined') console.log('[with-time] 耗时 ' + ms + ' ms');
+        return v;
+      }
       case 'case': {
         const v = ev(node[1], env, false);
         for(let i = 2; i < node.length; i++){
@@ -910,6 +959,12 @@ function setupBuiltins(env){
   D('<=', '小于等于');
   D('>=', '大于等于');
   D('not', '逻辑非：false 或 null 为真，其余为假');
+  D('while', '条件循环：(while 测试 体 ...) 反复求值体，直到测试为假/null 才停止；返回最后一次体的值（未执行则 null）');
+  D('for', '列表遍历：(for 变量 列表 体 ...) 依次把列表每个元素绑定到变量并执行体，返回最后一次体的值');
+  D('par', '轻量并发：把多个表达式包装成延迟求值的 future 列表，返回 future 列表（尚未计算）');
+  D('await', '等待 future：(await futures) 强制求值 par 产生的 future（列表或单个），返回结果列表/值');
+  D('time', '计时求值：(time expr) 返回 [值, 毫秒] 列表，毫秒为 expr 的求值耗时');
+  D('with-time', '计时执行：(with-time expr) 求值 expr 并打印耗时，返回 expr 的值');
   D('list', '构造列表：返回所有参数组成的列表');
   D('cons', '在列表/值前追加元素：(cons a b)');
   D('car', '取列表首元素');

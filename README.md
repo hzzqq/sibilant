@@ -2,7 +2,7 @@
 
 > 从零手写的 Lisp 解释器：词法分析 → 递归下降解析 → 树遍历求值 + 词法作用域闭包。带宏系统、尾递归优化（TCO）、模式匹配、哈希表、行号定位的运行时错误回溯，以及一个暗色 REPL。
 
-![tech](https://img.shields.io/badge/Lisp-Interpreter-c792ea) ![tco](https://img.shields.io/badge/TCO-trampoline-yellow) ![tests](https://img.shields.io/badge/tests-261-brightgreen) ![license](https://img.shields.io/badge/license-MIT-green)
+![tech](https://img.shields.io/badge/Lisp-Interpreter-c792ea) ![tco](https://img.shields.io/badge/TCO-trampoline-yellow) ![tests](https://img.shields.io/badge/tests-278-brightgreen) ![license](https://img.shields.io/badge/license-MIT-green)
 
 ---
 
@@ -25,6 +25,9 @@
 - **惰性求值**：`delay`/`force`/`promise?` + 惰性序列 `lazy-cons`/`lazy-car`/`lazy-cdr`/`lazy-take`（记忆化 + 无限流）。
 - **序列工具补全**：`range` 支持 `(start,end,step)` 三参写法；新增 `sort`（可选比较器）/ `drop` / `last` / `flatten` / `any?` / `every?`。并清理 STDLIB 预置库中与内置**参数序不一致/重复定义**的 `drop`/`flatten`/`last`/`any?`/`every?`（修复 `drop` 因签名翻转被覆盖的隐性 bug）。
 - **记忆化**：`memoize` 高阶函数按参数元组缓存结果，附 `memoized?` 判定与 `memo-cache-size` 观测。
+- **条件循环 / 列表遍历**：`while`（条件循环）+ `for`（列表遍历）特殊形式，补 `D()` 文档。
+- **轻量并发 `par` / `await`**：`par` 把子表达式包装成延迟求值的 `LPromise`（future）列表，`await` 强制求值（列表或单个）返回结果，基于既有惰性机制、纯同步可测。
+- **计时 `time` / `with-time`**：`time` 求值时序 `[值, 毫秒]` 列表；`with-time` 求值并打印耗时后返回表达式值。
 - **暗色 REPL**：示例按钮、历史导航（↑/↓）、多行（Shift+Enter）。
 
 ## 🧱 技术栈
@@ -39,7 +42,7 @@ python -m http.server 8080
 #    浏览器打开 http://localhost:8080/index.html
 
 # 2. 测试
-node _smoke.js      # 251/251
+node _smoke.js      # 268/268
 node _cli_test.js   # 10/10
 ```
 
@@ -80,7 +83,7 @@ interpreter.js
  ├─ setupBuiltins()—— 内置函数库
  └─ run()         —— 顶层入口（错误时拼【行 N】+源码片段+栈）
 index.html —— 暗色 REPL
-_smoke.js  —— 251 项冒烟测试
+_smoke.js  —— 268 项冒烟测试
 _cli_test.js —— 10 项 CLI 测试（文件 IO / 命令行入口）
 ```
 
