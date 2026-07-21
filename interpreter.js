@@ -543,9 +543,12 @@ function deepEqual(a, b){
   return false;
 }
 
+// ---- 文档字符串注册表（help / doc / docs 用）----
+const DOCS = {};
+
 // ---- 内置函数 ----
 function setupBuiltins(env){
-  const def = (n, f) => env.vars[n] = f;
+  const def = (n, f, doc) => { env.vars[n] = f; if(doc){ f.__doc = doc; DOCS[n] = doc; } return f; };
   def('+', (...a)=> a.reduce((x,y)=>x+y, 0));
   def('-', (a,...r)=> r.length ? r.reduce((x,y)=>x-y, a) : -a);
   def('*', (...a)=> a.reduce((x,y)=>x*y, 1));
@@ -675,6 +678,16 @@ function setupBuiltins(env){
   def('tan', (a)=> Math.tan(a));
   def('pi', Math.PI);
 
+  // ---- 位运算（32 位有符号整数语义，输入截断为 int32）----
+  const i32 = (a)=> Math.trunc(a) | 0;
+  def('bit-and', (a,b)=> i32(a) & i32(b));
+  def('bit-or',  (a,b)=> i32(a) | i32(b));
+  def('bit-xor', (a,b)=> i32(a) ^ i32(b));
+  def('bit-not', (a)=> ~i32(a));
+  def('bit-shift-left',  (a,n)=> i32(a) << (i32(n) & 31));
+  def('bit-shift-right', (a,n)=> i32(a) >> (i32(n) & 31));
+  def('bit-shift-right-logical', (a,n)=> i32(a) >>> (i32(n) & 31));
+
   // ---- 数值与数学（扩容）----
   // gcd / lcm：整数最大公约 / 最小公倍（0 与任何数 gcd=该数绝对值，lcm=0）
   def('gcd', (a,b)=>{
@@ -696,10 +709,10 @@ function setupBuiltins(env){
   def('quotient', (a,b)=>{ if(b === 0) throw lispError('quotient: 除以零'); return Math.trunc(a / b); });
   // random-int：随机整数，单参 [0,n)、双参 [a,b]（含端点）
   def('random-int', (a,b)=>{
-    if(b === undefined){ b = a; a = 0; }
+    if(b === undefined){ return Math.floor(Math.random() * Math.ceil(a || 1)); }   // [0,n)
     a = Math.ceil(a); b = Math.floor(b);
     if(a > b) throw lispError('random-int: 区间无效 a>b');
-    return a + Math.floor(Math.random() * (b - a + 1));
+    return a + Math.floor(Math.random() * (b - a + 1));                            // [a,b] 含端点
   });
   // 整数谓词（3.0 视为整数）
   def('integer?', (x)=> typeof x === 'number' && Number.isInteger(x));
@@ -723,6 +736,43 @@ function setupBuiltins(env){
   def('string-split', (s, sep)=> String(s).split(sep === undefined ? /\s+/ : String(sep)));
   def('string-join', (l, sep)=> Array.isArray(l) ? l.map(x => typeof x==='string'?x:lispStr(x)).join(String(sep||'')) : '');
   def('string-replace', (s, old, neu)=> String(s).split(String(old)).join(String(neu)));
+  // ---------- 正则表达式内置（基于 JS RegExp）----------
+  const mkRe = (pattern, flags)=> new RegExp(String(pattern), flags == null ? '' : String(flags));
+  const mkReG = (pattern, flags)=>{ let f = (flags == null ? '' : String(flags)); if(!f.includes('g')) f += 'g'; return new RegExp(String(pattern), f); };
+  def('regex-match', (pattern, str, flags)=> { const m = String(str).match(mkRe(pattern, flags)); return m || null; });
+  def('regex-test',  (pattern, str, flags)=> mkRe(pattern, flags).test(String(str)));
+  def('regex-find-all', (pattern, str, flags)=> String(str).match(mkReG(pattern, flags)) || []);
+  def('regex-replace', (pattern, str, repl, flags)=> String(str).replace(mkReG(pattern, flags), String(repl)));
+  def('regex-split', (pattern, str, flags)=> String(str).split(mkRe(pattern, flags)));
+  // ---------- JSON 序列化（与宿主环境互操作）----------
+  function jsonEnc(v){
+    if(v === null || v === undefined) return null;
+    if(typeof v === 'number' || typeof v === 'string') return v;
+    if(Array.isArray(v)) return v.map(jsonEnc);
+    if(v instanceof Dict){
+      const o = {};
+      for(const k of v.keys()){ const kk = (typeof k === 'string') ? k : lispStr(k); o[kk] = jsonEnc(v.get(k)); }
+      return o;
+    }
+    if(v instanceof LSet) return [...v.keys()].map(jsonEnc);
+    if(typeof v === 'boolean') return v;
+    if(typeof v === 'object'){ const o = {}; for(const kk of Object.keys(v)) o[kk] = jsonEnc(v[kk]); return o; }
+    return String(v);                                  // Sym 等 → 字符串
+  }
+  function jsonDec(x){
+    if(x === null || x === undefined) return null;
+    if(typeof x === 'number' || typeof x === 'boolean' || typeof x === 'string') return x;
+    if(Array.isArray(x)) return x.map(jsonDec);
+    if(x && typeof x === 'object'){
+      const d = new Dict();
+      for(const k of Object.keys(x)) d.put(k, jsonDec(x[k]), true);
+      return d;
+    }
+    return x;
+  }
+  def('json-encode', (v)=> JSON.stringify(jsonEnc(v)));
+  def('json-decode', (s)=> { try { return jsonDec(JSON.parse(String(s))); } catch(e){ throw lispError('json-decode: ' + e.message); } });
+  def('json?', (s)=> { try { JSON.parse(String(s)); return true; } catch(e){ return false; } });
   // 格式化输出：~a=lispStr, ~s=原串, ~d=数字, ~%=换行, ~~=~, 其余透传
   def('format', (fmt, ...args)=>{
     let i = 0, out = ''; const s = String(fmt);
@@ -798,6 +848,65 @@ function setupBuiltins(env){
     if(typeof process !== 'undefined') process.exit(code == null ? 0 : (typeof code === 'number' ? code : (Number(code) || 0)));
     throw lispError('exit 仅在 Node 环境可用');
   });
+
+  // ---- 文档查询（help / doc / docs）----
+  // help：查询某个符号的帮助（内置/函数）。接受符号或字符串，返回说明文本。
+  def('help', (sym)=>{
+    const name = sym instanceof Sym ? sym.name : (typeof sym === 'string' ? sym : lispStr(sym));
+    const d = DOCS[name];
+    if(d) return name + ': ' + d;
+    return '没有「' + name + '」的文档（可能未登记，或为自定义/标准库符号）';
+  });
+  // doc：返回某符号的文档字符串（无则 null）
+  def('doc', (sym)=>{
+    const name = sym instanceof Sym ? sym.name : (typeof sym === 'string' ? sym : lispStr(sym));
+    return DOCS[name] ?? null;
+  });
+  // docs：返回所有已登记文档的内置名列表（按字母序）
+  def('docs', ()=> Object.keys(DOCS).sort());
+
+  // 为核心内置补登文档字符串（供 help/doc 使用；D 同时写回函数的 __doc）
+  const D = (n, s)=> { DOCS[n] = s; const fn = env.vars[n]; if(fn && typeof fn === 'object' && fn.__doc === undefined) fn.__doc = s; };
+  D('+', '加法：返回所有参数的和（零个参数时为 0）');
+  D('-', '减法：单参取负；多参从第一个数依次减去其余');
+  D('*', '乘法：返回所有参数的积');
+  D('/', '除法：单参取倒数；多参从第一个数依次除以其余（除零抛错）');
+  D('=', '相等判定（按引用/值 ===）');
+  D('<', '小于：a < b');
+  D('>', '大于：a > b');
+  D('<=', '小于等于');
+  D('>=', '大于等于');
+  D('not', '逻辑非：false 或 null 为真，其余为假');
+  D('list', '构造列表：返回所有参数组成的列表');
+  D('cons', '在列表/值前追加元素：(cons a b)');
+  D('car', '取列表首元素');
+  D('cdr', '取列表除首元素外的剩余部分');
+  D('null?', '判断是否为空列表或 null');
+  D('list?', '判断是否为列表');
+  D('number?', '判断是否为数字');
+  D('symbol?', '判断是否为符号');
+  D('string?', '判断是否为字符串');
+  D('boolean?', '判断是否为布尔');
+  D('eq?', '引用相等判定');
+  D('equal?', '深比较相等（跨 list/dict/set/struct/tree 按值）');
+  D('map', '映射：对列表每个元素应用函数，返回新列表');
+  D('filter', '过滤：保留谓词为真的元素');
+  D('reduce', '归约：用函数把列表累积为单个值');
+  D('apply', '把函数应用到参数列表上');
+  D('range', '生成 0..n-1 的整数列表');
+  D('length', '返回列表或字符串长度');
+  D('print', '打印并返回各参数的字符串表示（空格分隔）');
+  D('help', '查询符号帮助：返回其文档说明文本');
+  D('doc', '返回符号的文档字符串（无则 null）');
+  D('docs', '返回所有已登记文档的内置名列表');
+  D('regex-match', '正则匹配：返回首个匹配（列表，含捕获组）或 null');
+  D('regex-test', '正则测试：是否匹配，返回布尔');
+  D('regex-find-all', '正则全匹配：返回所有匹配组成的列表');
+  D('regex-replace', '正则替换：按正则全局替换，返回新字符串');
+  D('regex-split', '正则分割：按正则把字符串切分为列表');
+  D('json-encode', 'JSON 序列化：把 Sibilant 值（数/串/布尔/列表/Dict/Set）转为 JSON 字符串');
+  D('json-decode', 'JSON 反序列化：把 JSON 字符串解析为 Sibilant 值（数组→列表、对象→Dict）');
+  D('json?', '判断字符串是否为合法 JSON');
 }
 
 function lispStr(v){

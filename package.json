@@ -4,8 +4,9 @@
   "description": "Sibilant — 自研 Lisp 方言解释器（手写词法/解析/求值 + 宏 + TCO + 行号定位）",
   "main": "interpreter.js",
   "scripts": {
+    "cli": "node run.js",
     "repl": "python -m http.server 8080",
-    "start": "python -m http.server 8080",
+    "start": "node run.js",
     "test": "node _smoke.js && node _cli_test.js"
   },
   "keywords": ["lisp", "interpreter", "scheme", "macro", "tco", "repl", "quasiquote"],

@@ -284,5 +284,52 @@ let riOK = true; for(let i=0;i<200;i++){ const v = run('(random-int 3 8)'); if(t
 ok('random-int 3 8 落在 [3,8]', riOK);
 ok('random-int 单参 [0,n)', run('(let ((v (random-int 5))) (and (>= v 0) (< v 5)))') === true);
 
+// ---- 位运算库（32 位有符号整数语义）----
+eq('bit-and', '(bit-and 12 10)', 8);          // 1100 & 1010 = 1000 = 8
+eq('bit-or', '(bit-or 12 10)', 14);           // 1100 | 1010 = 1110 = 14
+eq('bit-xor', '(bit-xor 12 10)', 6);         // 1100 ^ 1010 = 0110 = 6
+eq('bit-not', '(bit-not 0)', -1);             // ~0 = -1
+eq('bit-not 12', '(bit-not 12)', -13);       // ~1100 = ...11110011 = -13
+eq('bit-shift-left', '(bit-shift-left 1 4)', 16);
+eq('bit-shift-left 累加', '(bit-shift-left 3 2)', 12);
+eq('bit-shift-right 算术', '(bit-shift-right 16 2)', 4);
+eq('bit-shift-right 负数保号', '(bit-shift-right -16 2)', -4);
+eq('bit-shift-right-logical 负数', '(bit-shift-right-logical -16 2)', 1073741820);
+ok('bit-and 结果仍是整数', Number.isInteger(run('(bit-and 7 3)')));
+ok('bit-xor 自反', run('(bit-xor 5 5)') === 0);
+
+// ---- 文档字符串（help / doc / docs）----
+ok('help 返回字符串', typeof run('(help (quote +))') === 'string');
+ok('help 含说明文字', run('(help (quote +))').indexOf('加法') >= 0);
+ok('doc 返回文档', run('(doc (quote map))') === '映射：对列表每个元素应用函数，返回新列表');
+ok('doc 未登记返回 null', run('(doc (quote totally-unknown-sym-xyz))') === null);
+ok('docs 返回列表含 +', Array.isArray(run('(docs)')) && run('(docs)').indexOf('+') >= 0);
+ok('docs 含 help', run('(docs)').indexOf('help') >= 0);
+ok('help 未登记符号给出提示', run('(help (quote totally-unknown-sym-xyz))').indexOf('没有') >= 0);
+
+// ---- 正则表达式内置（regex-*）----
+ok('regex-test 命中', run('(regex-test "an" "banana")') === true);
+ok('regex-test 不命中', run('(regex-test "xyz" "banana")') === false);
+eq('regex-match 首匹配+捕获组', '(regex-match "(an)" "banana")', ['an', 'an']);
+ok('regex-match 不命中返回 null', run('(regex-match "zzz" "banana")') === null);
+eq('regex-find-all 全匹配', '(regex-find-all "an" "banana")', ['an','an']);
+eq('regex-replace 全局替换', '(regex-replace "a" "banana" "X")', 'bXnXnX');
+eq('regex-split 用分隔符切分', '(regex-split "n" "banana")', ['ba','a','a']);
+eq('regex-find-all 反斜杠 \\d+', '(regex-find-all "\\\\d+" "a1b22c333")', ['1','22','333']);
+ok('regex-match 文档已登记', run('(docs)').indexOf('regex-match') >= 0);
+ok('regex-split 文档已登记', run('(docs)').indexOf('regex-split') >= 0);
+
+// ---- JSON 序列化（json-encode / json-decode / json?）----
+eq('json-encode 列表', '(json-encode (list 1 2 3))', '[1,2,3]');
+eq('json-encode #t', '(json-encode #t)', 'true');
+eq('json-encode 字典', '(json-encode (dict (quote a) 1 (quote b) 2))', '{"a":1,"b":2}');
+ok('json-encode 字符串带引号', run('(json-encode "hi")') === '"hi"');
+ok('json-decode 列表 往返', lispStr(run('(json-decode (json-encode (list 1 2 3)))')) === '(1 2 3)');
+ok('json-decode 字典取值 往返', run('(dict-get (json-decode (json-encode (dict (quote a) 1 (quote b) 2))) "b")') === 2);
+ok('json 嵌套数组 往返', run('(car (car (json-decode (json-encode (list (list 9))))))') === 9);
+ok('json? 合法 JSON', run('(json? (json-encode (list 1)))') === true);
+ok('json? 非法 JSON', run('(json? "{bad")') === false);
+ok('json-encode 文档已登记', run('(docs)').indexOf('json-encode') >= 0);
+
 console.log(`\n[Sibilant smoke] pass=${pass} fail=${fail}`);
 process.exit(fail ? 1 : 0);
