@@ -577,7 +577,14 @@ function setupBuiltins(env){
   def('sqrt', (a)=> Math.sqrt(a));
   def('abs', (a)=> Math.abs(a));
   def('print', (...a)=> a.map(lispStr).join(' '));
-  def('range', (n)=> { const r=[]; for(let i=0;i<n;i++) r.push(i); return r; });
+  def('range', (a, b, step)=> {
+    if(b === undefined){ const r=[]; for(let i=0;i<a;i++) r.push(i); return r; }
+    const st = (step === undefined) ? 1 : step;
+    const r = [];
+    if(st > 0){ for(let i=a; i<b; i+=st) r.push(i); }
+    else if(st < 0){ for(let i=a; i>b; i+=st) r.push(i); }
+    return r;
+  });
   def('length', (x)=> Array.isArray(x) ? x.length : (typeof x==='string' ? x.length : 0));
   def('map', (f,l)=> Array.isArray(l) ? l.map(x=>applyFn(f,[x])) : []);
   def('filter', (f,l)=> Array.isArray(l) ? l.filter(x=>applyFn(f,[x])) : []);
@@ -795,6 +802,32 @@ function setupBuiltins(env){
   def('reverse', (l)=> Array.isArray(l) ? l.slice().reverse() : []);
   def('take', (l, n)=> Array.isArray(l) ? l.slice(0, n) : []);
   def('nth', (l, i)=> Array.isArray(l) ? (l[i] ?? null) : null);
+  // 序列工具补全：排序 / 切片 / 取尾 / 取末 / 扁平化 / 谓词聚合
+  def('sort', (l, cmp)=> {
+    if(!Array.isArray(l)) return [];
+    const r = l.slice();
+    if(cmp === undefined) r.sort((x,y)=> (x<y)?-1:(x>y)?1:0);
+    else r.sort((x,y)=> { const v = applyFn(cmp,[x,y]); return (v===true||v>0)?-1:(v===false||v<0)?1:0; });
+    return r;
+  });
+  def('drop', (l, n)=> Array.isArray(l) ? l.slice(n) : []);
+  def('last', (l)=> (Array.isArray(l) && l.length) ? l[l.length-1] : null);
+  def('flatten', (l)=> {
+    const out = [];
+    const walk = (x)=>{ if(Array.isArray(x)) x.forEach(walk); else out.push(x); };
+    if(Array.isArray(l)) l.forEach(walk);
+    return out;
+  });
+  def('any?', (f, l)=> {
+    if(!Array.isArray(l)) return false;
+    for(const x of l){ const v = applyFn(f,[x]); if(v !== false && v !== null) return true; }
+    return false;
+  });
+  def('every?', (f, l)=> {
+    if(!Array.isArray(l)) return true;
+    for(const x of l){ const v = applyFn(f,[x]); if(v === false || v === null) return false; }
+    return true;
+  });
 
   // ---- 惰性求值：delay / force / promise? ----
   def('force', (p)=> forcePromise(p));
@@ -893,7 +926,13 @@ function setupBuiltins(env){
   D('filter', '过滤：保留谓词为真的元素');
   D('reduce', '归约：用函数把列表累积为单个值');
   D('apply', '把函数应用到参数列表上');
-  D('range', '生成 0..n-1 的整数列表');
+  D('range', '生成整数列表：(range n) 为 0..n-1；(range a b [step]) 为 a 起、步长 step 直到越过 b');
+  D('sort', '排序列表：无比较器按数值/字典序；给定 (cmp a b) 谓词则按其正负/真假决定次序');
+  D('drop', '丢弃列表前 n 个元素，返回剩余');
+  D('last', '返回列表最后一个元素（空列表为 null）');
+  D('flatten', '把任意嵌套列表拍平为一维列表');
+  D('any?', '谓词对任意元素为真则返回真（空列表为否）');
+  D('every?', '谓词对所有元素为真则返回真（空列表为真）');
   D('length', '返回列表或字符串长度');
   D('print', '打印并返回各参数的字符串表示（空格分隔）');
   D('help', '查询符号帮助：返回其文档说明文本');
@@ -932,18 +971,13 @@ function lispStr(v){
 const STDLIB = `
 (define identity (lambda (x) x))
 (define constantly (lambda (x) (lambda (_) x)))
-(define drop (lambda (n xs) (if (or (<= n 0) (null? xs)) xs (drop (- n 1) (cdr xs)))))
 (define compose (lambda (& fs) (lambda (x) (foldl (lambda (acc f) (f acc)) x (reverse fs)))))
-(define flatten (lambda (xs) (foldl (lambda (acc x) (if (list? x) (append acc (flatten x)) (append acc (list x)))) (list) xs)))
-(define partition (lambda (n xs) (if (null? xs) (list) (cons (take xs n) (partition n (drop n xs))))))
+(define partition (lambda (n xs) (if (null? xs) (list) (cons (take xs n) (partition n (drop xs n))))))
 (define take-while (lambda (p xs) (if (or (null? xs) (not (p (car xs)))) (list) (cons (car xs) (take-while p (cdr xs))))))
 (define drop-while (lambda (p xs) (if (or (null? xs) (not (p (car xs)))) xs (drop-while p (cdr xs)))))
 (define sum (lambda (xs) (foldl + 0 xs)))
 (define product (lambda (xs) (foldl * 1 xs)))
-(define last (lambda (xs) (if (null? (cdr xs)) (car xs) (last (cdr xs)))))
 (define butlast (lambda (xs) (if (null? (cdr xs)) (list) (cons (car xs) (butlast (cdr xs))))))
-(define any? (lambda (p xs) (if (null? xs) #f (if (p (car xs)) #t (any? p (cdr xs))))))
-(define every? (lambda (p xs) (if (null? xs) #t (if (not (p (car xs))) #f (every? p (cdr xs))))))
 (define remove (lambda (p xs) (filter (lambda (x) (not (p x))) xs)))
 (define zipmap (lambda (ks vs) (foldl (lambda (d kv) (dict-set d (car kv) (car (cdr kv)))) (dict) (zip ks vs))))
 (define frequencies (lambda (xs) (foldl (lambda (d x) (dict-set d x (+ (dict-get d x 0) 1))) (dict) xs)))

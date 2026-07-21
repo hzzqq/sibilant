@@ -51,6 +51,23 @@ ok('for-each', lispStr(run('(define xs (list)) (for-each (lambda (x) (set! xs (c
 ok('assoc', lispStr(run('(assoc (quote b) (list (list (quote a) 1) (list (quote b) 2)))')) === '(b 2)');
 ok('acons', lispStr(run('(acons (quote x) 9 (list (list (quote y) 1)))')) === '((x 9) (y 1))');
 
+// ---- 序列工具补全 (ci70) ----
+eq('range 1arg', '(range 4)', [0,1,2,3]);
+eq('range 2arg', '(range 2 5)', [2,3,4]);
+eq('range step', '(range 0 9 3)', [0,3,6]);
+eq('range neg-step', '(range 5 0 -2)', [5,3,1]);
+eq('range empty', '(range 2 2)', []);
+eq('sort num', '(sort (list 3 1 2))', [1,2,3]);
+ok('sort cmp', lispStr(run('(sort (list 3 1 2) (lambda (a b) (> a b)))')) === '(3 2 1)');
+eq('drop', '(drop (list 1 2 3 4) 2)', [3,4]);
+eq('last', '(last (list 1 2 3))', 3);
+eq('last empty', '(last (list))', null);
+eq('flatten', '(flatten (list 1 (list 2 (list 3 4)) 5))', [1,2,3,4,5]);
+ok('any? true', run('(any? (lambda (x) (> x 3)) (list 1 2 3 4))') === true);
+ok('any? false', run('(any? (lambda (x) (> x 9)) (list 1 2 3))') === false);
+ok('every? true', run('(every? (lambda (x) (> x 0)) (list 1 2 3))') === true);
+ok('every? false', run('(every? (lambda (x) (> x 0)) (list 1 -2 3))') === false);
+
 // ---- 哈希表 dict (O(1) 查找) ----
 ok('dict empty', run('(dict-len (dict))') === 0);
 ok('dict len', run('(dict-len (dict (quote a) 1 (quote b) 2))') === 2);
