@@ -371,6 +371,17 @@ function ev(node, env, tail){
       case 'lazy-cons':
         return new LStream(ev(node[1], env, false), new LPromise(node[2], env));
       case 'quasiquote': return ev(qq(node[1]), env, tail);
+      case 'load': {
+        if(typeof require !== 'function') throw lispError('load 仅在 Node 环境可用', node);
+        const p = String(ev(node[1], env, false));
+        let src;
+        try { src = require('fs').readFileSync(p, 'utf8'); }
+        catch(e){ throw lispError('load 无法读取文件: ' + p, node); }
+        const exprs = parseAll(src);
+        let r = null;
+        for(let i=0;i<exprs.length;i++) r = resolveTail(ev(exprs[i], env, i === exprs.length-1 ? tail : false));
+        return r;
+      }
       case 'if': {
         const t = ev(node[1], env, false);
         return (t !== false && t !== null) ? ev(node[2], env, tail) : (node.length > 3 ? ev(node[3], env, tail) : null);
@@ -490,6 +501,19 @@ function ev(node, env, tail){
           const ne = makeEnv(env);
           ne.vars[varName] = item;
           for(let i = 3; i < node.length; i++) r = ev(node[i], ne, false);
+        }
+        return r;
+      }
+      case 'dotimes': {
+        // (dotimes (i n) body...) — 把计数器 i 从 0 绑定到 n-1，依次执行 body，返回最后一次 body 的值（n<=0 返回 null）
+        if(!(node[1] instanceof Array) || node[1].length !== 2 || !(node[1][0] instanceof Sym)) throw lispError('dotimes 第一参数须为 (变量 次数)', node);
+        const varName = node[1][0].name;
+        const n = Math.floor(Number(ev(node[1][1], env, false))) || 0;
+        let r = null;
+        for(let i = 0; i < n; i++){
+          const ne = makeEnv(env);
+          ne.vars[varName] = i;
+          for(let k = 2; k < node.length; k++) r = ev(node[k], ne, false);
         }
         return r;
       }
@@ -734,6 +758,13 @@ function setupBuiltins(env){
   def('symbol?', (x)=> x instanceof Sym);
   def('string?', (x)=> typeof x==='string');
   def('boolean?', (x)=> typeof x==='boolean');
+  def('float?', (x)=> typeof x==='number' && !Number.isInteger(x));
+  def('pos?', (x)=> typeof x==='number' && x>0);
+  def('neg?', (x)=> typeof x==='number' && x<0);
+  def('bool?', (x)=> typeof x==='boolean');
+  def('function?', (x)=> typeof x==='function' || (x && x.__lambda) === true);
+  def('nil?', (x)=> x===null || (Array.isArray(x) && x.length===0));
+  def('empty?', (x)=> x===null || (Array.isArray(x) && x.length===0) || (typeof x==='string' && x.length===0));
   def('eq?', (a,b)=> a===b);
   def('equal?', (a,b)=> deepEqual(a,b));
   def('mod', (a,b)=> { if(b===0) throw lispError('mod: 除以零'); return ((a%b)+b)%b; });
@@ -753,6 +784,18 @@ function setupBuiltins(env){
   def('filter', (f,l)=> Array.isArray(l) ? l.filter(x=>applyFn(f,[x])) : []);
   def('reduce', (f,init,l)=> Array.isArray(l) ? l.reduce((a,x)=>applyFn(f,[a,x]), init) : init);
   def('apply', (f,l)=> applyFn(f, Array.isArray(l)?l:[]));
+
+  // 函数组合：返回新函数 (comp f g h) => x => f(g(h(x)))，参数透传给最右侧函数
+  def('comp', (...fns) => {
+    if(fns.length === 0) return (x)=> x;
+    return (...args) => {
+      let r = applyFn(fns[fns.length-1], args);
+      for(let i = fns.length-2; i >= 0; i--) r = applyFn(fns[i], [r]);
+      return r;
+    };
+  });
+  // 偏应用：返回新函数，调用时把预设的前缀参数拼在前面 (partial f a b) => (...rest) => f(a, b, ...rest)
+  def('partial', (fn, ...pre) => (...rest) => applyFn(fn, pre.concat(rest)));
 
   // ---- 序列折叠 / 压缩 ----
   def('foldl', (f, init, l)=> Array.isArray(l) ? l.reduce((a,x)=>applyFn(f,[a,x]), init) : init);
@@ -1063,6 +1106,7 @@ function setupBuiltins(env){
 
   // 为核心内置补登文档字符串（供 help/doc 使用；D 同时写回函数的 __doc）
   const D = (n, s)=> { DOCS[n] = s; const fn = env.vars[n]; if(fn && typeof fn === 'object' && fn.__doc === undefined) fn.__doc = s; };
+  D('load', '载入并执行一个 .lisp 文件：在当前环境求值其全部顶层表单，返回文件最后一个表达式的值；文件内 define 直接注入当前环境，可见后续代码');
   D('+', '加法：返回所有参数的和（零个参数时为 0）');
   D('-', '减法：单参取负；多参从第一个数依次减去其余');
   D('*', '乘法：返回所有参数的积');
@@ -1075,6 +1119,7 @@ function setupBuiltins(env){
   D('not', '逻辑非：false 或 null 为真，其余为假');
   D('while', '条件循环：(while 测试 体 ...) 反复求值体，直到测试为假/null 才停止；返回最后一次体的值（未执行则 null）');
   D('for', '列表遍历：(for 变量 列表 体 ...) 依次把列表每个元素绑定到变量并执行体，返回最后一次体的值');
+  D('dotimes', '计数循环：(dotimes (变量 次数) 体 ...) 把计数器从 0 绑到 次数-1 依次执行体，返回最后一次体的值；次数<=0 返回 null');
   D('par', '轻量并发：把多个表达式包装成延迟求值的 future 列表，返回 future 列表（尚未计算）');
   D('await', '等待 future：(await futures) 强制求值 par 产生的 future（列表或单个），返回结果列表/值');
   D('time', '计时求值：(time expr) 返回 [值, 毫秒] 列表，毫秒为 expr 的求值耗时');
@@ -1089,12 +1134,21 @@ function setupBuiltins(env){
   D('symbol?', '判断是否为符号');
   D('string?', '判断是否为字符串');
   D('boolean?', '判断是否为布尔');
+  D('float?', '判断是否为带小数的浮点数（数字且非整数）');
+  D('pos?', '判断是否为正数（>0）');
+  D('neg?', '判断是否为负数（<0）');
+  D('bool?', '判断是否为布尔（bool? 是 boolean? 的别名）');
+  D('function?', '判断是否为函数（原生函数或 lambda 闭包）');
+  D('nil?', '判断是否为空列表或 null（nil? 是 null? 的别名）');
+  D('empty?', '判断是否为空：空列表 / null / 空字符串');
   D('eq?', '引用相等判定');
   D('equal?', '深比较相等（跨 list/dict/set/struct/tree 按值）');
   D('map', '映射：对列表每个元素应用函数，返回新列表');
   D('filter', '过滤：保留谓词为真的元素');
   D('reduce', '归约：用函数把列表累积为单个值');
   D('apply', '把函数应用到参数列表上');
+  D('comp', '函数组合：(comp f g h) 返回新函数，调用时等价于 f(g(h(参数…)))，参数透传给最右函数；零参时返回恒等函数');
+  D('partial', '偏应用：(partial f a b) 返回新函数，调用时等价于 f(a, b, 余下参数…)，用于固定前若干个参数');
   D('range', '生成整数列表：(range n) 为 0..n-1；(range a b [step]) 为 a 起、步长 step 直到越过 b');
   D('sort', '排序列表：无比较器按数值/字典序；给定 (cmp a b) 谓词则按其正负/真假决定次序');
   D('drop', '丢弃列表前 n 个元素，返回剩余');

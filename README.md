@@ -2,7 +2,7 @@
 
 > 从零手写的 Lisp 解释器：词法分析 → 递归下降解析 → 树遍历求值 + 词法作用域闭包。带宏系统、尾递归优化（TCO）、模式匹配、哈希表、行号定位的运行时错误回溯，以及一个暗色 REPL。
 
-![tech](https://img.shields.io/badge/Lisp-Interpreter-c792ea) ![tco](https://img.shields.io/badge/TCO-trampoline-yellow) ![tests](https://img.shields.io/badge/tests-324-brightgreen) ![license](https://img.shields.io/badge/license-MIT-green)
+![tech](https://img.shields.io/badge/Lisp-Interpreter-c792ea) ![tco](https://img.shields.io/badge/TCO-trampoline-yellow) ![tests](https://img.shields.io/badge/tests-377-brightgreen) ![license](https://img.shields.io/badge/license-MIT-green)
 
 ---
 
@@ -33,6 +33,11 @@
 - **条件宏 `when` / `unless`**：`defmacro` 实现的条件执行宏——`(when test & body)` 展开为 `(if test (begin ...))`，`(unless test & body)` 展开为 `(if (not test) (begin ...))`；宏体经 `list`/`cons` 拼装以确保 `test` 作为原始 AST 在运行期求值（非编译期恒真），并接入 `help`/`doc` 文档系统。
 - **模式解构（语法糖）**：`bindDestruct` 支持符号绑定 / `_` 与 `else` 通配 / 嵌套数组位置解构 / `&` 剩余收集，接入 `let`/`let*`/`letrec`/`loop` 绑定与 `lambda`/`define`/`defmacro` 参数。
 - **暗色 REPL**：示例按钮、历史导航（↑/↓）、多行（Shift+Enter）。
+- **函数组合 `comp`**：右→左组合多个一元函数，`(comp f g)` 等价于 `(lambda (x) (f (g x)))`，零参返回恒等函数；可作用于内置（car/cdr）与 `map`（ci107）。
+- **偏应用 `partial`**：固定函数前缀参数返回新函数，单个/多个前缀均支持，`((partial + 100) x)` 等同 `(+ 100 x)`，可配合 `map`/`cons`（ci111）。
+- **定次循环 `dotimes`**：特殊形式 `(dotimes (i n) body...)` 从 0 到 n-1 循环绑定 `i`，返回 `null`；补 `D()` 文档（ci115）。
+- **数值 / 类型谓词扩容**：新增 `float?`/`pos?`/`neg?`/`bool?`/`function?`/`nil?`/`empty?` 七个谓词，覆盖浮点判定、正负号、布尔 / 函数 / 空值检测，全接入 `help`/`doc`（ci119）。
+- **文件载入 `load`**：特殊形式 `(load "file.lisp")` 读入并执行外部脚本，共享调用方环境、返回末值，便于把代码拆成多文件模块（ci123）。
 
 ## 🧱 技术栈
 
@@ -48,6 +53,11 @@ python -m http.server 8080
 # 2. 测试
 node _smoke.js      # 314/314
 node _cli_test.js   # 10/10
+node _comp_test.js  # 9/9
+node _partial_test.js # 6/6
+node _dotimes_test.js # 7/7
+node _predicates_test.js # 25/25
+node _load_test.js  # 6/6
 ```
 
 ## 📝 示例
@@ -87,8 +97,13 @@ interpreter.js
  ├─ setupBuiltins()—— 内置函数库
  └─ run()         —— 顶层入口（错误时拼【行 N】+源码片段+栈）
 index.html —— 暗色 REPL
-_smoke.js  —— 296 项冒烟测试
+_smoke.js  —— 314 项冒烟测试
 _cli_test.js —— 10 项 CLI 测试（文件 IO / 命令行入口）
+_comp_test.js —— 9 项函数组合测试
+_partial_test.js —— 6 项偏应用测试
+_dotimes_test.js —— 7 项定次循环测试
+_predicates_test.js —— 25 项谓词扩容测试
+_load_test.js —— 6 项文件载入测试
 ```
 
 ## 📄 许可

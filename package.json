@@ -7,7 +7,7 @@
     "cli": "node run.js",
     "repl": "python -m http.server 8080",
     "start": "node run.js",
-    "test": "node _smoke.js && node _cli_test.js"
+    "test": "node _smoke.js && node _cli_test.js && node _comp_test.js && node _partial_test.js && node _dotimes_test.js && node _predicates_test.js && node _load_test.js"
   },
   "keywords": ["lisp", "interpreter", "scheme", "macro", "tco", "repl", "quasiquote"],
   "author": "hzzqq",
