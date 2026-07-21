@@ -3,7 +3,7 @@ const fs = require('fs');
 const path = require('path');
 global.window = {};
 new Function(fs.readFileSync(path.join(__dirname, 'interpreter.js'), 'utf8'))();
-const { run, lispStr } = global.window.Sibilant;
+const { run, lispStr, Sym } = global.window.Sibilant;
 
 let pass = 0, fail = 0;
 function ok(name, cond){ if(cond) pass++; else { fail++; console.log('  FAIL', name); } }
@@ -370,6 +370,49 @@ ok('json 嵌套数组 往返', run('(car (car (json-decode (json-encode (list (l
 ok('json? 合法 JSON', run('(json? (json-encode (list 1)))') === true);
 ok('json? 非法 JSON', run('(json? "{bad")') === false);
 ok('json-encode 文档已登记', run('(docs)').indexOf('json-encode') >= 0);
+
+// ---- 线程宏（-> 插入第二位置 / ->> 插入最后位置）----
+eq('-> 基础', '(-> 5 (+ 3))', 8);
+eq('-> 串联', '(-> 5 (+ 1) (* 3))', 18);
+eq('-> 插入第二位置', '(-> 2 (list 9))', [2,9]);
+ok('-> 文档已登记', run('(docs)').indexOf('->') >= 0);
+eq('->> 基础', '(->> 5 (+ 3))', 8);
+eq('->> 串联', '(->> 5 (+ 1) (* 3))', 18);
+eq('->> 插入最后位置', '(->> 2 (list 9))', [9,2]);
+ok('->> 文档已登记', run('(docs)').indexOf('->>') >= 0);
+
+// ---- 宏调试与卫生：gensym / macroexpand / macroexpand-1 ----
+// 注意：run() 每次新建环境，宏需在同一 run 内定义并使用
+const mx = run('(begin \
+  (defmacro my-when (c a b) (list (quote if) c a b)) \
+  (list \
+    (macroexpand-1 (quote (my-when (> 1 0) (print 1) (print 2)))) \
+    (macroexpand (quote (my-when (> 1 0) (print 1) (print 2)))) \
+    (macroexpand (quote (if 1 2 3))) \
+    (macroexpand (quote (quote (my-when 1 2 3)))) \
+  ))');
+ok('macroexpand-1 头展开为 if', mx[0][0] instanceof Sym && mx[0][0].name === 'if' && mx[0].length === 4);
+ok('macroexpand 完全展开为 if', mx[1][0] instanceof Sym && mx[1][0].name === 'if' && mx[1].length === 4);
+ok('macroexpand 无宏原样(头仍是 if)', mx[2][0] instanceof Sym && mx[2][0].name === 'if');
+ok('macroexpand quote 内部不展开', mx[3][0] instanceof Sym && mx[3][0].name === 'quote' && mx[3][1][0] instanceof Sym && mx[3][1][0].name === 'my-when');
+ok('gensym 返回 Sym', run('(gensym)') instanceof Sym);
+ok('gensym 每次不同', run('(gensym)').name !== run('(gensym)').name);
+ok('gensym 带前缀', run('(gensym "x")').name.indexOf('x') === 0);
+ok('macroexpand-1 文档已登记', run('(docs)').indexOf('macroexpand-1') >= 0);
+ok('macroexpand 文档已登记', run('(docs)').indexOf('macroexpand') >= 0);
+ok('gensym 文档已登记', run('(docs)').indexOf('gensym') >= 0);
+
+// ---- 模式解构（let / 函数参数 / loop / 宏；括号即列表字面量）----
+ok('let 列表位置解构', lispStr(run('(let (((a b) (list 1 2))) (list a b))')) === '(1 2)');
+ok('let 嵌套解构', lispStr(run('(let (((a (b c)) (list 1 (list 2 3)))) (list a b c))')) === '(1 2 3)');
+ok('let & 剩余', lispStr(run('(let (((x & xs) (list 1 2 3 4))) (list x xs))')) === '(1 (2 3 4))');
+ok('let _ 通配跳过', lispStr(run('(let (((a _ c) (list 1 9 3))) (list a c))')) === '(1 3)');
+ok('let 解构失败被 try 捕获', run('(try (let (((a b c) (list 1 2))) 0) (catch e 42))') === 42);
+ok('lambda 参数解构', run('((lambda ((a b)) (+ a b)) (list 10 20))') === 30);
+ok('define 函数参数解构', run('(begin (define (f (a b)) (* a b)) (f (list 4 5)))') === 20);
+ok('lambda 嵌套 + & 剩余', lispStr(run('((lambda ((x (y & ys)) z) (list x y ys z)) (list 1 (list 2 3 4)) 9)')) === '(1 2 (3 4) 9)');
+ok('loop 绑定解构 (fib)', run('(loop f ((n 4) ((acc r) (list 0 1))) (if (<= n 0) acc (f (- n 1) (list r (+ acc r)))))') === 3);
+ok('宏参数解构', lispStr(run('(begin (defmacro dest (((a b)) body) (list (quote let) (list (list (quote p) (list (quote list) a b))) body)) (dest ((7 8)) p))')) === '(7 8)');
 
 console.log(`\n[Sibilant smoke] pass=${pass} fail=${fail}`);
 process.exit(fail ? 1 : 0);

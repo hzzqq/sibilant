@@ -226,7 +226,7 @@ function evalBodyTCO(body, env, tail){
 // 尾调用：返回此标记，由 trampoline 循环展开
 function callLambdaCore(fn, args){
   const ne = makeEnv(fn.env);
-  fn.params.forEach((p, i) => ne.vars[p.name] = args[i]);
+  fn.params.forEach((p, i) => { if(p instanceof Sym) ne.vars[p.name] = args[i]; else bindDestruct(p, args[i], ne); });
   if(fn.rest) ne.vars[fn.rest.name] = args.slice(fn.params.length);
   const label = fn.name || '(lambda)';
   callStack.push(label);
@@ -251,7 +251,7 @@ function applyFn(fn, args, node){
 }
 function applyMacro(m, rawArgs){
   const ne = makeEnv(m.env);
-  m.params.forEach((p, i) => ne.vars[p.name] = rawArgs[i]);
+  m.params.forEach((p, i) => { if(p instanceof Sym) ne.vars[p.name] = rawArgs[i]; else bindDestruct(p, rawArgs[i], ne); });
   if(m.rest) ne.vars[m.rest.name] = rawArgs.slice(m.params.length);
   return evalBodyTCO(m.body, ne, false);  // 返回展开后的 AST
 }
@@ -322,6 +322,34 @@ function matchPattern(pat, val, binds, env){
   return { ok:false, binds };
 }
 
+// 解构绑定：用于 let/lambda/loop/宏 等，把模式 pat 匹配到值 val 并写入环境 ne。
+// 支持：符号(绑定；_ / else 通配跳过)、嵌套数组(位置解构)、& 剩余(收集其余元素)。
+function bindDestruct(pat, val, ne){
+  if(pat instanceof Sym){
+    const n = pat.name;
+    if(n === '_' || n === 'else') return;     // 通配符，跳过绑定
+    ne.vars[n] = val;
+    return;
+  }
+  if(!Array.isArray(pat)){
+    // 标量字面量模式：严格相等校验
+    if(pat !== val) throw lispError('解构字面量不匹配: ' + lispStr(pat), pat);
+    return;
+  }
+  if(!Array.isArray(val)) throw lispError('解构期望列表，得到: ' + lispStr(val), pat);
+  let restIdx = -1;
+  for(let i = 0; i < pat.length; i++){ if(pat[i] instanceof Sym && pat[i].name === '&'){ restIdx = i; break; } }
+  if(restIdx >= 0){
+    for(let i = 0; i < restIdx; i++) bindDestruct(pat[i], val[i], ne);
+    const restSym = pat[restIdx + 1];
+    if(!(restSym instanceof Sym)) throw lispError('& 之后须为符号', pat);
+    ne.vars[restSym.name] = val.slice(restIdx);
+    return;
+  }
+  if(pat.length > val.length) throw lispError('解构模式长度(' + pat.length + ')超过值长度(' + val.length + ')', pat);
+  for(let i = 0; i < pat.length; i++) bindDestruct(pat[i], val[i], ne);
+}
+
 function ev(node, env, tail){
   if(node === null) return null;
   if(typeof node === 'number' || typeof node === 'string' || typeof node === 'boolean') return node;
@@ -380,22 +408,30 @@ function ev(node, env, tail){
       case 'lambda': return makeLambda(node[1], node.slice(2), env);
       case 'let': {
         const ne = makeEnv(env);
-        for(const b of node[1]) ne.vars[b[0].name] = ev(b[1], env, false);
+        for(const b of node[1]){
+          const v = ev(b[1], env, false);
+          if(b[0] instanceof Sym) ne.vars[b[0].name] = v;
+          else bindDestruct(b[0], v, ne);
+        }
         return evalBodyTCO(node.slice(2), ne, tail);
       }
       case 'let*': {
         let ne = env;
         for(const b of node[1]){
           const inner = makeEnv(ne);
-          inner.vars[b[0].name] = ev(b[1], ne, false);
+          const v = ev(b[1], ne, false);
+          if(b[0] instanceof Sym) inner.vars[b[0].name] = v; else bindDestruct(b[0], v, inner);
           ne = inner;
         }
         return evalBodyTCO(node.slice(2), ne, tail);
       }
       case 'letrec': {       // 互递归绑定：先预占位，再按序求值（lambda 可互相引用）
         const ne = makeEnv(env);
-        for(const b of node[1]) ne.vars[b[0].name] = undefined;
-        for(const b of node[1]) ne.vars[b[0].name] = ev(b[1], ne, false);
+        for(const b of node[1]){ if(b[0] instanceof Sym) ne.vars[b[0].name] = undefined; }
+        for(const b of node[1]){
+          const v = ev(b[1], ne, false);
+          if(b[0] instanceof Sym) ne.vars[b[0].name] = v; else bindDestruct(b[0], v, ne);
+        }
         return evalBodyTCO(node.slice(2), ne, tail);
       }
       case 'loop': {
@@ -403,7 +439,7 @@ function ev(node, env, tail){
         const binds = node[2];
         const bodyForms = node.slice(3);
         const ne = makeEnv(env);
-        const params = binds.map(b => new Sym(b[0].name));
+        const params = binds.map(b => b[0]);   // 允许解构模式作为 loop 绑定名
         const inits = binds.map(b => ev(b[1], env, false));
         const fn = makeLambda(params, bodyForms, ne, fname);
         ne.vars[fname] = fn;
@@ -468,6 +504,24 @@ function ev(node, env, tail){
         const ms = Date.now() - t0;
         if(typeof console !== 'undefined') console.log('[with-time] 耗时 ' + ms + ' ms');
         return v;
+      }
+      case '->': {   // 线程宏（Clojure 风格）：把上一步结果插入下一表单的【第二个】位置
+        let x = ev(node[1], env, false);
+        for(let i = 2; i < node.length; i++){
+          const f = node[i];
+          const form = Array.isArray(f) ? [f[0], x, ...f.slice(1)] : [f, x];
+          x = ev(form, env, false);
+        }
+        return x;
+      }
+      case '->>': {  // 线程宏（Clojure 风格）：把上一步结果插入下一表单的【最后一个】位置
+        let x = ev(node[1], env, false);
+        for(let i = 2; i < node.length; i++){
+          const f = node[i];
+          const form = Array.isArray(f) ? [...f, x] : [f, x];
+          x = ev(form, env, false);
+        }
+        return x;
       }
       case 'case': {
         const v = ev(node[1], env, false);
@@ -596,8 +650,41 @@ function deepEqual(a, b){
 const DOCS = {};
 
 // ---- 内置函数 ----
+// 模块级 gensym 计数器：run() 每次 newEnv 都会重跑 setupBuiltins，故放在模块级以跨 run 保持唯一
+let GENSYM_COUNTER = 0;
 function setupBuiltins(env){
   const def = (n, f, doc) => { env.vars[n] = f; if(doc){ f.__doc = doc; DOCS[n] = doc; } return f; };
+  DOCS['->']  = '线程宏：把前一步结果插入下一表单的第二个位置，串联多次调用。例 (-> 5 (+ 3) (* 2)) => 16';
+  DOCS['->>'] = '线程宏：把前一步结果插入下一表单的最后一个位置。例 (->> 5 (+ 3) (* 2)) => 16';
+  // ---- 宏调试与卫生 ----
+  const STOP_Q = new Set(['quote','quasiquote','unquote','unquote-splicing']);
+  // 仅展开头部一次（若头部是已定义宏），否则原样返回
+  function macroexpand1(form){
+    if(form instanceof Array && form.length && form[0] instanceof Sym){
+      const fnVal = envGet(env, form[0].name);
+      if(fnVal && fnVal.__macro) return applyMacro(fnVal, form.slice(1));
+    }
+    return form;
+  }
+  // 完全展开：递归进子表达式；quote/quasiquote/unquote 内部不展开（避免吞掉用户引用）
+  function macroexpandAll(form){
+    if(!(form instanceof Array)) return form;
+    if(form.length && form[0] instanceof Sym){
+      const name = form[0].name;
+      if(STOP_Q.has(name)) return form;
+      const fnVal = envGet(env, name);
+      if(fnVal && fnVal.__macro) return macroexpandAll(applyMacro(fnVal, form.slice(1)));
+    }
+    return form.map(macroexpandAll);
+  }
+  def('gensym', (p)=>{
+      const pre = (typeof p === 'string' && p) ? p : 'g';
+      return new Sym(pre + (++GENSYM_COUNTER));
+    }, '生成唯一符号 gensym([前缀])：每次调用返回不同符号，用于宏卫生，避免名字捕获冲突。');
+  def('macroexpand-1', (form)=> macroexpand1(form),
+      '展开一次宏调用：若头部是已定义宏则展开一步，否则原样返回。用于检视单步宏展开。');
+  def('macroexpand', (form)=> macroexpandAll(form),
+      '完全展开所有(含嵌套)宏调用，返回纯代码；quote/quasiquote/unquote 内部不展开。');
   def('+', (...a)=> a.reduce((x,y)=>x+y, 0));
   def('-', (a,...r)=> r.length ? r.reduce((x,y)=>x-y, a) : -a);
   def('*', (...a)=> a.reduce((x,y)=>x*y, 1));
