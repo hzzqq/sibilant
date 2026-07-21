@@ -7,10 +7,20 @@
     "cli": "node run.js",
     "repl": "python -m http.server 8080",
     "start": "node run.js",
-    "test": "node _smoke.js && node _cli_test.js && node _comp_test.js && node _partial_test.js && node _dotimes_test.js && node _predicates_test.js && node _load_test.js"
+    "test": "node _cli_test.js && node _comp_test.js && node _complement_test.js && node _compose_test.js && node _dotimes_test.js && node _load_test.js && node _partial_test.js && node _predicates_test.js && node _query_test.js && node _scan_test.js && node _seq_test.js && node _smoke.js"
   },
-  "keywords": ["lisp", "interpreter", "scheme", "macro", "tco", "repl", "quasiquote"],
+  "keywords": [
+    "lisp",
+    "interpreter",
+    "scheme",
+    "macro",
+    "tco",
+    "repl",
+    "quasiquote"
+  ],
   "author": "hzzqq",
   "license": "MIT",
-  "engines": { "node": ">=16" }
+  "engines": {
+    "node": ">=16"
+  }
 }

@@ -783,6 +783,16 @@ function setupBuiltins(env){
   def('map', (f,l)=> Array.isArray(l) ? l.map(x=>applyFn(f,[x])) : []);
   def('filter', (f,l)=> Array.isArray(l) ? l.filter(x=>applyFn(f,[x])) : []);
   def('reduce', (f,init,l)=> Array.isArray(l) ? l.reduce((a,x)=>applyFn(f,[a,x]), init) : init);
+  // complement（谓词取反）：返回新谓词，调用 f 后对结果取逻辑非(Sibilant 中 false/null 视为假)。
+  // 例 (filter (complement even?) (list 1 2 3)) => (1 3)
+  def('complement', (f)=> (...args)=> { const r = applyFn(f, args); return (r === false || r === null); }, '返回谓词 f 的否定谓词：(complement f) 接受与 f 相同参数，调用 f 后对结果取逻辑非(Sibilant 中 false/null 视为假，其余为真)。常用于 (filter (complement pred) xs)。例 (filter (complement even?) (list 1 2 3)) => (1 3)');
+  // scan（前缀累积 / reductions）：返回从 init 起、每步用 f 累积的列表（含初始值），长度 = len(xs)+1
+  def('scan', (f, init, l)=>{
+    if(!Array.isArray(l)) return [init];
+    const r = [init]; let acc = init;
+    for(const x of l){ acc = applyFn(f, [acc, x]); r.push(acc); }
+    return r;
+  }, '前缀累积(reductions)：(scan f init xs) 返回从 init 起每一步用 f 累积的结果列表(含初始值)，长度 = len(xs)+1；常用于生成前缀和/前缀积。例 (scan + 0 \'(1 2 3)) => (0 1 3 6)');
   def('apply', (f,l)=> applyFn(f, Array.isArray(l)?l:[]));
 
   // 函数组合：返回新函数 (comp f g h) => x => f(g(h(x)))，参数透传给最右侧函数
@@ -852,6 +862,33 @@ function setupBuiltins(env){
   def('dict-keys', (d)=> (d instanceof Dict) ? d.keys() : []);
   def('dict-vals', (d)=> (d instanceof Dict) ? d.vals() : []);
   def('dict-len', (d)=> (d instanceof Dict) ? d.len : 0);
+  // 字典组合：合并 / 更新 / 嵌套取值
+  def('merge', (d1, d2)=> {
+    if(!(d1 instanceof Dict) || !(d2 instanceof Dict)) throw lispError('merge 需要两个 dict');
+    let r = d1._clone();
+    const ks = d2.keys(), vs = d2.vals();
+    for(let i=0;i<ks.length;i++) r = r.put(ks[i], vs[i], false);
+    return r;
+  }, '合并两个 dict：返回新 dict，键取自 d1∪d2，冲突时 d2 胜出(后者覆盖前者)。例 (merge (dict (quote a) 1) (dict (quote b) 2)) => #{a 1 b 2}');
+  def('update', (d, k, f)=> {
+    if(!(d instanceof Dict)) throw lispError('update 需要 dict');
+    const cur = d.has(k) ? d.get(k) : null;
+    return d.put(k, applyFn(f, [cur]), false);
+  }, '以函数 f 更新 dict 中键 k 的值：取当前值(无则 null)传给 f，结果写回，返回新 dict。例 (update (dict (quote x) 1) (quote x) (lambda (v) (+ v 10))) => #{x 11}');
+  def('get-in', (coll, ks, defv)=> {
+    if(!Array.isArray(ks)) return (defv===undefined) ? null : defv;
+    let cur = coll;
+    for(const k of ks){
+      if(cur === null || cur === undefined) return (defv===undefined) ? null : defv;   // 路径提前断裂
+      let found = false, nv = null;
+      if(Array.isArray(cur)){ const i = (typeof k === 'number') ? k : Number(k); found = Number.isFinite(i) && i>=0 && i<cur.length; if(found) nv = cur[i]; }
+      else if(cur instanceof Dict){ found = cur.has(k); if(found) nv = cur.get(k); }
+      else return (defv===undefined) ? null : defv;                                // 非容器，无法继续下钻
+      if(!found) return (defv===undefined) ? null : defv;                        // 键缺失 → 返回默认值
+      cur = nv;
+    }
+    return cur;
+  }, '按键序列 ks 在嵌套结构(dict / 数组)中逐层取值；任一路径缺失返回 null 或 defv(仅在键缺失/路径断裂时，值本身为 null 不触发默认)。例 (get-in (dict (quote a) (dict (quote b) 2)) (list (quote a) (quote b))) => 2');
 
   // ---- 集合 (Set, 以 lispStr 去重，不可变) ----
   def('set', (...args)=>{ const s = new LSet(); for(const a of args) s.add(a, true); return s; });
@@ -1016,6 +1053,19 @@ function setupBuiltins(env){
     else r.sort((x,y)=> { const v = applyFn(cmp,[x,y]); return (v===true||v>0)?-1:(v===false||v<0)?1:0; });
     return r;
   });
+  def('sort-by', (f, l)=> {
+    if(!Array.isArray(l)) return [];
+    const r = l.slice();
+    r.sort((x,y)=> { const kx = applyFn(f, [x]), ky = applyFn(f, [y]); return (kx<ky)?-1:(kx>ky)?1:0; });
+    return r;
+  }, '按键函数 f 的返回值对列表升序排序，返回新列表(原列表不变)。例 (sort-by (lambda (x) (mod x 3)) (list 3 1 2)) => (3 1 2)');
+  def('partition', (n, l)=> {
+    if(!Array.isArray(l)) return [];
+    const size = Math.max(1, n|0);
+    const out = [];
+    for(let i=0;i<l.length;i+=size) out.push(l.slice(i, i+size));
+    return out;
+  }, '将列表每 n 个切分为一组子列表(末组不足 n 也保留)。例 (partition 2 (list 1 2 3 4 5)) => ((1 2) (3 4) (5))');
   def('drop', (l, n)=> Array.isArray(l) ? l.slice(n) : []);
   def('last', (l)=> (Array.isArray(l) && l.length) ? l[l.length-1] : null);
   def('flatten', (l)=> {
@@ -1024,6 +1074,29 @@ function setupBuiltins(env){
     if(Array.isArray(l)) l.forEach(walk);
     return out;
   });
+  // ---- 列表查询 / 聚合工具 ----
+  def('find', (f, l)=> {
+    if(!Array.isArray(l)) return null;
+    for(const x of l){ const v = applyFn(f, [x]); if(v !== false && v !== null) return x; }
+    return null;
+  }, '返回列表中首个使谓词 f 为真(非 false/null)的元素；未找到返回 null。例 (find even? (list 1 3 4)) => 4');
+  def('find-index', (f, l)=> {
+    if(!Array.isArray(l)) return null;
+    for(let i=0; i<l.length; i++){ const v = applyFn(f, [l[i]]); if(v !== false && v !== null) return i; }
+    return null;
+  }, '返回列表中首个使谓词 f 为真的元素下标；未找到返回 null。例 (find-index even? (list 1 3 4)) => 2');
+  def('distinct', (l)=> {
+    if(!Array.isArray(l)) return [];
+    const seen = [], out = [];
+    for(const x of l){ if(!seen.some(s => deepEqual(s, x))){ seen.push(x); out.push(x); } }
+    return out;
+  }, '去重：保留首次出现顺序，用 deepEqual 判定相等。例 (distinct (list 1 1 2 3 2)) => (1 2 3)');
+  def('frequencies', (l)=> {
+    const m = {}, out = [];
+    if(Array.isArray(l)) for(const x of l){ const k = JSON.stringify(x); m[k] = (m[k] || 0) + 1; }
+    for(const k in m){ out.push([JSON.parse(k), m[k]]); }
+    return out;
+  }, '统计各元素出现次数，返回计数 dict #{元素 次数 ...}（插入序，可用 dict-keys/dict-get 读取）。例 (frequencies (list 1 1 2)) => #{1 2 2 1}');
   def('any?', (f, l)=> {
     if(!Array.isArray(l)) return false;
     for(const x of l){ const v = applyFn(f,[x]); if(v !== false && v !== null) return true; }
@@ -1034,6 +1107,44 @@ function setupBuiltins(env){
     for(const x of l){ const v = applyFn(f,[x]); if(v === false || v === null) return false; }
     return true;
   });
+
+  // ---- 序列分组/切分工具 ----
+  // 按 f(x) 的分组键把列表分组，返回 dict(键=分组键, 值=同组元素列表, 保持原序)
+  def('group-by', (f, l)=> {
+    const m = new Map();   // 保持插入序(整数键也要保序，故不用普通对象)
+    if(Array.isArray(l)) for(const x of l){ const k = applyFn(f, [x]); const kk = JSON.stringify(k); const arr = m.get(kk); if(arr) arr.push(x); else m.set(kk, [x]); }
+    let d = new Dict();
+    for(const [kk, arr] of m) d = d.put(JSON.parse(kk), arr, false);   // Dict 不可变：put 返回新 dict，需重新赋值
+    return d;
+  }, '按 f(x) 的分组键把列表分组，返回 dict(键=分组键, 值=同组元素列表, 保持原序)。例 (group-by even? (list 1 2 3 4)) => #{#f (1 3) #t (2 4)}');
+  // 把列表按「相邻且 f 值相等」切成若干段(返回段的列表)
+  def('partition-by', (f, l)=> {
+    if(!Array.isArray(l)) return [];
+    const out = []; let run = [], key = null, started = false;
+    for(const x of l){
+      const k = applyFn(f, [x]);
+      if(!started){ started = true; key = k; run = [x]; }
+      else if(deepEqual(k, key)){ run.push(x); }
+      else { out.push(run); run = [x]; key = k; }
+    }
+    if(run.length) out.push(run);
+    return out;
+  }, '把列表按「相邻且 f 值相等」切成若干段(返回段的列表)。例 (partition-by even? (list 1 2 4 3 5)) => ((1) (2 4) (3 5))');
+  // 把列表在「首个不满足 f 的位置」切成两段(返回两段组成的列表)
+  def('split-with', (f, l)=> {
+    if(!Array.isArray(l)) return [[], []];
+    let i = 0;
+    for(; i < l.length; i++){ const v = applyFn(f, [l[i]]); if(v === false || v === null) break; }
+    return [l.slice(0, i), l.slice(i)];
+  }, '把列表在「首个不满足 f 的位置」切成两段(返回两段组成的列表)。例 (split-with pos? (list 1 2 -1 3)) => ((1 2) (-1 3))');
+  // 交错合并多个列表(按索引轮流取，先到先止)
+  def('interleave', (...lsts)=> {
+    const arrs = lsts.filter(Array.isArray);
+    if(arrs.length === 0) return [];
+    const out = []; let any = true;
+    for(let i = 0; any; i++){ any = false; for(const a of arrs){ if(i < a.length){ out.push(a[i]); any = true; } } }
+    return out;
+  }, '交错合并多个列表(按索引轮流取)。例 (interleave (list 1 2) (list 3 4 5)) => (1 3 2 4 5)');
 
   // ---- 惰性求值：delay / force / promise? ----
   def('force', (p)=> forcePromise(p));
