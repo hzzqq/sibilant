@@ -405,6 +405,21 @@ function ev(node, env, tail){
         envSet(env, name + '?', (rec)=> !!(rec && rec.__struct === name));
         return new Sym(name);
       }
+      case 'defn': {
+        const nameSym = node[1];
+        if(!(nameSym instanceof Sym)) throw lispError('defn 第一个参数必须是函数名', node);
+        let i = 2;
+        let docStr = null;
+        if(typeof node[i] === 'string'){ docStr = node[i]; i++; }
+        const argList = node[i];
+        if(!Array.isArray(argList)) throw lispError('defn 第二参数必须是参数列表', node);
+        i++;
+        const body = node.slice(i);
+        if(body.length === 0) throw lispError('defn 函数体不能为空', node);
+        if(docStr) DOCS[nameSym.name] = docStr;
+        const lambdaNode = [new Sym('lambda'), argList].concat(body);
+        return ev([new Sym('define'), nameSym, lambdaNode], env, tail);
+      }
       case 'lambda': return makeLambda(node[1], node.slice(2), env);
       case 'let': {
         const ne = makeEnv(env);
@@ -656,6 +671,18 @@ function setupBuiltins(env){
   const def = (n, f, doc) => { env.vars[n] = f; if(doc){ f.__doc = doc; DOCS[n] = doc; } return f; };
   DOCS['->']  = '线程宏：把前一步结果插入下一表单的第二个位置，串联多次调用。例 (-> 5 (+ 3) (* 2)) => 16';
   DOCS['->>'] = '线程宏：把前一步结果插入下一表单的最后一个位置。例 (->> 5 (+ 3) (* 2)) => 16';
+  DOCS['defn'] = '函数语法糖：把 (defn 名 (参数…) 体…) 展开为 (define 名 (lambda (参数…) 体…))；第二参数若为字符串则作为文档串登记。例 (defn sq (x) (* x x)) 后 (sq 5) => 25';
+  // when / unless 条件宏：用 list/cons 构造输出 AST（把 test 原样拼入 if，待运行时再求值），
+  // 命中(或 unless 取反命中)才顺序求值体(begin)并返回末值，否则返回 null
+  env.vars['when'] = makeMacro([new Sym('test'), new Sym('&'), new Sym('body')],
+    [[new Sym('list'), [new Sym('quote'), new Sym('if')], new Sym('test'),
+      [new Sym('cons'), [new Sym('quote'), new Sym('begin')], new Sym('body')]]], env);
+  env.vars['unless'] = makeMacro([new Sym('test'), new Sym('&'), new Sym('body')],
+    [[new Sym('list'), [new Sym('quote'), new Sym('if')],
+      [new Sym('list'), [new Sym('quote'), new Sym('not')], new Sym('test')],
+      [new Sym('cons'), [new Sym('quote'), new Sym('begin')], new Sym('body')]]], env);
+  DOCS['when']   = '条件宏：当 test 为真时顺序求值体(begin)并返回末值，否则返回 null。例 (when (> 3 2) (print "yes") 42) => 42';
+  DOCS['unless'] = '条件宏：当 test 为假时顺序求值体(begin)并返回末值，否则返回 null（与 when 相反）。例 (unless false 7) => 7';
   // ---- 宏调试与卫生 ----
   const STOP_Q = new Set(['quote','quasiquote','unquote','unquote-splicing']);
   // 仅展开头部一次（若头部是已定义宏），否则原样返回

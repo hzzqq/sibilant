@@ -159,6 +159,20 @@ eq('quasiquote 反引用拼接',
    [1,2,3,4]);
 eq('& 变参', '(define (sum-all & ns) (reduce + 0 ns)) (sum-all 1 2 3 4)', 10);
 
+// ---- 内置 when / unless 条件宏（无需用户定义，setupBuiltins 已注册）----
+// 注意：Sibilant 无 true/false 字面量符号，条件用比较/逻辑表达式（宏体内 if 求值 test）
+eq('内置 when 命中返回末值', '(when (> 3 1) 1 2 3)', 3);
+ok('内置 when 未命中返回 null', run('(when (> 1 2) 1 2)') === null);
+eq('内置 when 单条体', '(when (> 3 1) "hit")', 'hit');
+eq('内置 when 体内 define 生效', '(when (> 3 1) (define wv 10) wv)', 10);
+eq('内置 unless 命中返回末值', '(unless (> 1 2) 5 6)', 6);
+ok('内置 unless 未命中返回 null', run('(unless (> 2 1) 5)') === null);
+ok('内置 when/unless 互补', (()=>{ const a = run('(when (> 1 2) (quote yes))'); const b = run('(unless (> 1 2) (quote no))'); return a === null && lispStr(b) === 'no'; })());
+ok('help when 已登记', run('(docs)').indexOf('when') >= 0);
+ok('help unless 已登记', run('(docs)').indexOf('unless') >= 0);
+ok('macroexpand-1 内置 when 展开为 if+begin 体', (()=>{ const m = run('(macroexpand-1 (quote (when (> 1 2) a b)))'); return Array.isArray(m) && m[0] instanceof Sym && m[0].name === 'if' && m.length === 3 && m[2][0] instanceof Sym && m[2][0].name === 'begin'; })());
+ok('macroexpand-1 内置 unless 展开为 if+(not test)+begin 体', (()=>{ const m = run('(macroexpand-1 (quote (unless (> 1 2) a b)))'); return Array.isArray(m) && m[0] instanceof Sym && m[0].name === 'if' && m.length === 3 && m[1][0] instanceof Sym && m[1][0].name === 'not' && m[2][0] instanceof Sym && m[2][0].name === 'begin'; })());
+
 // ---- 尾递归 ----
 eq('尾递归求和', '(define (sum n acc) (if (= n 0) acc (sum (- n 1) (+ acc n)))) (sum 100000 0)', 5000050000);
 
@@ -413,6 +427,15 @@ ok('define 函数参数解构', run('(begin (define (f (a b)) (* a b)) (f (list 
 ok('lambda 嵌套 + & 剩余', lispStr(run('((lambda ((x (y & ys)) z) (list x y ys z)) (list 1 (list 2 3 4)) 9)')) === '(1 2 (3 4) 9)');
 ok('loop 绑定解构 (fib)', run('(loop f ((n 4) ((acc r) (list 0 1))) (if (<= n 0) acc (f (- n 1) (list r (+ acc r)))))') === 3);
 ok('宏参数解构', lispStr(run('(begin (defmacro dest (((a b)) body) (list (quote let) (list (list (quote p) (list (quote list) a b))) body)) (dest ((7 8)) p))')) === '(7 8)');
+
+// ---- defn 语法糖（展开为 define + lambda；可选文档串登记到 DOCS）----
+ok('defn 基本 (sq 5)=25', run('(defn sq (x) (* x x)) (sq 5)') === 25);
+ok('defn 多参 (add 3 4)=7', run('(defn add (a b) (+ a b)) (add 3 4)') === 7);
+ok('defn 多体返回末值', run('(defn f (x) (+ x 0) (+ x 1)) (f 2)') === 3);
+ok('defn 文档串登记 (doc)', run('(defn hi "打招呼" (n) n) (doc (quote hi))') === '打招呼');
+ok('defn 文档串进 docs 列表', run('(docs)').indexOf('hi') >= 0);
+ok('defn 命名递归 (fact 5)=120', run('(defn fact (n) (if (<= n 1) 1 (* n (fact (- n 1))))) (fact 5)') === 120);
+ok('defn 高阶 (map dbl)', lispStr(run('(defn dbl (x) (* x 2)) (map dbl (list 1 2 3))')) === '(2 4 6)');
 
 console.log(`\n[Sibilant smoke] pass=${pass} fail=${fail}`);
 process.exit(fail ? 1 : 0);

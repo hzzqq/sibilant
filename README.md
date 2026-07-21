@@ -2,7 +2,7 @@
 
 > 从零手写的 Lisp 解释器：词法分析 → 递归下降解析 → 树遍历求值 + 词法作用域闭包。带宏系统、尾递归优化（TCO）、模式匹配、哈希表、行号定位的运行时错误回溯，以及一个暗色 REPL。
 
-![tech](https://img.shields.io/badge/Lisp-Interpreter-c792ea) ![tco](https://img.shields.io/badge/TCO-trampoline-yellow) ![tests](https://img.shields.io/badge/tests-306-brightgreen) ![license](https://img.shields.io/badge/license-MIT-green)
+![tech](https://img.shields.io/badge/Lisp-Interpreter-c792ea) ![tco](https://img.shields.io/badge/TCO-trampoline-yellow) ![tests](https://img.shields.io/badge/tests-324-brightgreen) ![license](https://img.shields.io/badge/license-MIT-green)
 
 ---
 
@@ -30,6 +30,7 @@
 - **计时 `time` / `with-time`**：`time` 求值时序 `[值, 毫秒]` 列表；`with-time` 求值并打印耗时后返回表达式值。
 - **线程宏 `->` / `->>`**：Clojure 风格，把上一步结果插入下一表单第二位置（或最后位置），串联多次调用。
 - **宏调试与卫生**：`gensym([前缀])` 生成跨 run 唯一符号（宏卫生），`macroexpand-1` / `macroexpand` 展开宏（`quote`/`quasiquote`/`unquote` 内部不展开）。
+- **条件宏 `when` / `unless`**：`defmacro` 实现的条件执行宏——`(when test & body)` 展开为 `(if test (begin ...))`，`(unless test & body)` 展开为 `(if (not test) (begin ...))`；宏体经 `list`/`cons` 拼装以确保 `test` 作为原始 AST 在运行期求值（非编译期恒真），并接入 `help`/`doc` 文档系统。
 - **模式解构（语法糖）**：`bindDestruct` 支持符号绑定 / `_` 与 `else` 通配 / 嵌套数组位置解构 / `&` 剩余收集，接入 `let`/`let*`/`letrec`/`loop` 绑定与 `lambda`/`define`/`defmacro` 参数。
 - **暗色 REPL**：示例按钮、历史导航（↑/↓）、多行（Shift+Enter）。
 
@@ -45,7 +46,7 @@ python -m http.server 8080
 #    浏览器打开 http://localhost:8080/index.html
 
 # 2. 测试
-node _smoke.js      # 296/296
+node _smoke.js      # 314/314
 node _cli_test.js   # 10/10
 ```
 
