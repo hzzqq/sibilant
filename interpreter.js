@@ -1377,6 +1377,25 @@ function setupBuiltins(env){
     return l.slice(k).concat(l.slice(0, k));
   }, '循环左移：(rotate n l) 把列表向左循环移动 n 位(负数右移)。例 (rotate 1 (list 1 2 3 4)) => (2 3 4 1)、(rotate -1 (list 1 2 3 4)) => (4 1 2 3)');
   def('juxt', (...fs)=> (...args)=> fs.map(f => applyFn(f, args)), '将多个函数并置为一个函数：调用时返回各函数作用于同一参数的结果列表。例 ((juxt inc dec) 5) => (6 4)');
+  // ---- 高阶函数补充：fnil / trampoline ----
+  // fnil：返回 f 的包装，调用时把为 nil(null/undefined) 的前 N 个参数替换为对应默认值
+  // (fnil f d0 d1 ...) => (...args) => f(第 i 个为 nil 时取 di)
+  def('fnil', (f, ...defaults) => (...args) => {
+    const a = args.slice();
+    for(let i = 0; i < defaults.length && i < a.length; i++){ if(a[i] == null || (Array.isArray(a[i]) && a[i].length === 0)) a[i] = defaults[i]; }
+    return applyFn(f, a);
+  }, '为 nil 参数提供默认值的高阶函数：(fnil f d0 d1 ...) 返回 f 的包装函数，调用时把前若干位置上的 nil（null / 空列表 ()）参数替换为对应默认值。例 ((fnil + 1) () 2) => 3、((fnil str "x") ()) => "x"');
+  // trampoline：避免深度尾递归爆栈——反复调用返回的函数(thunk)直到得到非函数值
+  // (trampoline f & args) => 先 applyFn(f, args)；若结果是函数则继续调用之，直到返回非函数值
+  def('trampoline', (f, ...args) => {
+    let r = applyFn(f, args);
+    let steps = 0;
+    while(r && r.__lambda && steps < 1000000){ r = applyFn(r, []); steps++; }
+    return r;
+  }, '蹦床：避免尾递归爆栈。(trampoline f & args) 先调用 f(args)，若结果是函数(闭包)则继续调用之(无参)，重复直到返回非函数值。例 (trampoline (lambda (n) (if (= n 0) 0 (lambda () (... (dec n)))))) 0');
+  // ---- 符号 introspection：name / namespace ----
+  def('name', (x)=> (x instanceof Sym) ? x.name : (typeof x === 'string' ? x : null), '取名字：符号返回其名称字符串，字符串原样返回，其余返回 null。例 (name (quote foo)) => "foo"、(name "bar") => "bar"、(name 5) => null');
+  def('namespace', (x)=> { if(!(x instanceof Sym)) return ''; const i = x.name.indexOf('/'); return i >= 0 ? x.name.slice(0, i) : ''; }, '取命名空间：符号名以 / 分隔时返回 / 之前部分，无命名空间返回空串。例 (namespace (quote a/b)) => "a"、(namespace (quote foo)) => ""');
   def('keep-indexed', (f, l)=> {
     if(!Array.isArray(l)) return [];
     const out = [];
@@ -1777,6 +1796,78 @@ function setupBuiltins(env){
   D('json-encode', 'JSON 序列化：把 Sibilant 值（数/串/布尔/列表/Dict/Set）转为 JSON 字符串');
   D('json-decode', 'JSON 反序列化：把 JSON 字符串解析为 Sibilant 值（数组→列表、对象→Dict）');
   D('json?', '判断字符串是否为合法 JSON');
+
+  // ===== 自驱循环新增内置（ci247~ci275）=====
+  // ---- ci247: 序列切片 ----
+  def('nfirst', (n, coll)=> Array.isArray(coll) ? coll.slice(0, n) : [], '取序列前 n 个元素组成新列表：(nfirst n coll) 等价于 (take coll n)。例 (nfirst 2 (list 1 2 3 4)) => (1 2)');
+  def('nthrest', (n, coll)=> Array.isArray(coll) ? coll.slice(n) : [], '取序列第 n 个(0 基)之后的剩余部分：(nthrest n coll) 等价于 (drop coll n)。例 (nthrest 1 (list (quote a) (quote b) (quote c))) => (b c)');
+
+  // ---- ci251: 分组与嵌套更新 ----
+  def('partition-n', (n, coll)=> {
+    if(!Array.isArray(coll) || !Number.isInteger(n) || n <= 0) return [];
+    const out = [];
+    for(let i = 0; i + n <= coll.length; i += n) out.push(coll.slice(i, i + n));
+    return out;
+  }, '按固定大小 n 将序列分成若干长度为 n 的子列表(最后不足 n 个的尾部丢弃)，返回「列表的列表」。例 (partition-n 2 (list 1 2 3 4)) => ((1 2) (3 4))');
+  def('update-in', (m, ks, f, ...args)=> {
+    if(!Array.isArray(ks)) throw lispError('update-in 需要键序列(list)');
+    const rec = (node, path) => {
+      if(path.length === 0) return node;
+      const k = path[0];
+      const child = (node instanceof Dict) ? (node.has(k) ? node.get(k) : null)
+                   : (Array.isArray(node) ? node[k] : null);
+      if(path.length === 1){
+        const nv = applyFn(f, [child === undefined ? null : child, ...args]);
+        if(node instanceof Dict) return node.put(k, nv);
+        if(Array.isArray(node)){ const a = node.slice(); a[k] = nv; return a; }
+        return new Dict().put(k, nv);
+      }
+      const newChild = rec(child, path.slice(1));
+      if(node instanceof Dict) return node.put(k, newChild);
+      if(Array.isArray(node)){ const a = node.slice(); a[k] = newChild; return a; }
+      return new Dict().put(k, newChild);
+    };
+    return rec(m, ks);
+  }, '不可变更新嵌套结构：(update-in m (k1 …) f & args) 沿路径 ks 取到当前值，以 (f 当前值 ...args) 计算新值并写回，返回新集合(原值不变)。例 (update-in (dict (quote a) (dict (quote b) 1)) (list (quote a) (quote b)) (lambda (v) (+ v 10))) => #{a #{b 11}}');
+
+  // ---- ci255: 向量与判空 ----
+  def('vector', (...args)=> args, '构造向量(列表)：(vector a b c) 返回由参数组成的列表 (a b c)。例 (vector 1 2 3) => (1 2 3)');
+  def('not-empty?', (coll)=> {
+    if(coll === null || coll === undefined) return false;
+    if(Array.isArray(coll)) return coll.length > 0;
+    if(typeof coll === 'string') return coll.length > 0;
+    if(coll instanceof Dict) return coll.len > 0;
+    if(coll instanceof LSet) return coll.len > 0;
+    return true;
+  }, '判断集合是否非空(empty? 的反义)：非空列表/非空字符串/非空 dict/非空 set 为真，空集合或 nil 为假。例 (not-empty? (list 1)) => #t、(not-empty? (list)) => #f');
+
+  // ---- ci259: 序列判定与 next ----
+  def('seq?', (x)=> Array.isArray(x) || typeof x === 'string', '判断是否为序列(列表/向量/字符串)。例 (seq? (list 1 2)) => #t、(seq? "abc") => #t、(seq? 5) => #f');
+  def('next', (x)=> {
+    if(Array.isArray(x)) return x.slice(1);
+    if(typeof x === 'string') return x.slice(1);
+    return null;
+  }, '返回序列除首元素后的剩余部分(空序列返回空列表/空串)：列表/向量用 (rest …)，字符串返回去首字符的子串。例 (next (list 1 2 3)) => (2 3)、(next (list 1)) => ()');
+
+  // ---- ci263: 类型判定 ----
+  def('map?', (x)=> x instanceof Dict, '判断是否为映射(map/dict)。例 (map? (dict (quote a) 1)) => #t、(map? (list 1)) => #f');
+  def('vector?', (x)=> Array.isArray(x), '判断是否为向量(列表)。例 (vector? (vector 1 2)) => #t、(vector? (dict)) => #f');
+
+  // ---- ci267: 函数与整数判定 ----
+  def('fn?', (x)=> typeof x === 'function' || (x && x.__lambda) === true, '判断是否为函数(含 lambda 闭包)。例 (fn? (lambda (x) x)) => #t、(fn? 5) => #f');
+  def('int?', (x)=> typeof x === 'number' && Number.isInteger(x), '判断是否为整数(含负整数)。例 (int? 5) => #t、(int? -3) => #t、(int? 2.5) => #f');
+
+  // ---- ci271: 缺失谓词 ----
+  def('char?', (x)=> typeof x === 'string' && x.length === 1, '判断是否为单字符(长度为 1 的字符串)。例 (char? "a") => #t、(char? "ab") => #f');
+  def('sorted?', (coll)=> {
+    if(!Array.isArray(coll)) return false;
+    for(let i = 1; i < coll.length; i++){ if(!(coll[i-1] <= coll[i])) return false; }
+    return true;
+  }, '判断序列是否升序排列(每相邻元素满足 <=)。例 (sorted? (list 1 2 3)) => #t、(sorted? (list 3 1)) => #f、(sorted? (list)) => #t');
+
+  // ---- ci275: 缺失数值 helper ----
+  def('square', (x)=> { const n = Number(x); return n * n; }, '平方：(square x) 返回 x 的平方。例 (square 5) => 25、(square -3) => 9');
+  def('double', (x)=> Number(x) * 2, '加倍：(double x) 返回 x*2。例 (double 21) => 42、(double 0) => 0');
 }
 
 function lispStr(v){
