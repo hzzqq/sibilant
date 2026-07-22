@@ -353,6 +353,14 @@ function bindDestruct(pat, val, ne){
   for(let i = 0; i < pat.length; i++) bindDestruct(pat[i], val[i], ne);
 }
 
+// 把 AST 中所有与 sym 同名的符号替换为 val（as-> 占位符展开用）
+function QQ(v){ return [new Sym('quote'), v]; }
+function substSym(form, sym, val){
+  if(form instanceof Sym) return (form.name === sym.name) ? QQ(val) : form;
+  if(Array.isArray(form)){ const r = []; for(const e of form) r.push(substSym(e, sym, val)); r.line = form.line; return r; }
+  return form;
+}
+
 function ev(node, env, tail){
   if(node === null) return null;
   if(typeof node === 'number' || typeof node === 'string' || typeof node === 'boolean') return node;
@@ -565,6 +573,89 @@ function ev(node, env, tail){
         }
         return x;
       }
+      // ---- ci279–ci303: 线程/绑定宏（特殊形式实现，便于 nil 短路与占位替换）----
+      case 'when-let': {
+        if(!Array.isArray(node[1]) || node[1].length < 2) throw lispError('when-let 需要 (名 表达式) 绑定', node);
+        const b = node[1];
+        const v = ev(b[1], env, false);
+        if(v !== false && v !== null){
+          const ne = makeEnv(env);
+          ne.vars[b[0].name] = v;
+          let r = null;
+          for(let i = 2; i < node.length; i++) r = ev(node[i], ne, i === node.length - 1 ? tail : false);
+          return r;
+        }
+        return null;
+      }
+      case 'if-let': {
+        if(!Array.isArray(node[1]) || node[1].length < 2) throw lispError('if-let 需要 (名 表达式) 绑定', node);
+        const b = node[1];
+        const v = ev(b[1], env, false);
+        const ne = makeEnv(env);
+        ne.vars[b[0].name] = v;
+        if(v !== false && v !== null){
+          if(node.length > 2) return ev(node[2], ne, tail);   // 真分支（单表单）
+          return null;
+        }
+        if(node.length > 3) return evalBodyTCO(node.slice(3), ne, tail);  // 假分支
+        return null;
+      }
+      case 'doto': {
+        if(node.length < 2) throw lispError('doto 需要至少一个表达式', node);
+        const v = ev(node[1], env, false);
+        for(let i = 2; i < node.length; i++){
+          const f = node[i];
+          const form = Array.isArray(f) ? [f[0], QQ(v), ...f.slice(1)] : [f, QQ(v)];
+          ev(form, env, false);
+        }
+        return v;
+      }
+      case 'as->': {
+        if(node.length < 3) throw lispError('as-> 需要 (expr 名 & forms)', node);
+        const nameSym = node[2];
+        if(!(nameSym instanceof Sym)) throw lispError('as-> 第二参数须为占位符号', node);
+        let x = ev(node[1], env, false);
+        for(let i = 3; i < node.length; i++){
+          const form = substSym(node[i], nameSym, x);
+          x = ev(form, env, false);
+        }
+        return x;
+      }
+      case 'some->': {
+        let x = ev(node[1], env, false);
+        for(let i = 2; i < node.length; i++){
+          if(x === false || x === null) return null;
+          const f = node[i];
+          const form = Array.isArray(f) ? [f[0], QQ(x), ...f.slice(1)] : [f, QQ(x)];
+          x = ev(form, env, false);
+        }
+        return x;
+      }
+      case 'some->>': {
+        let x = ev(node[1], env, false);
+        for(let i = 2; i < node.length; i++){
+          if(x === false || x === null) return null;
+          const f = node[i];
+          const form = Array.isArray(f) ? [...f, QQ(x)] : [f, QQ(x)];
+          x = ev(form, env, false);
+        }
+        return x;
+      }
+      case 'cond->': {
+        if(node.length < 2) throw lispError('cond-> 需要初始表达式', node);
+        let x = ev(node[1], env, false);
+        for(let i = 2; i < node.length; i++){
+          const clause = node[i];
+          if(!Array.isArray(clause) || clause.length < 2) throw lispError('cond-> 子句须为 (测试 表单)', node);
+          const test = ev(clause[0], env, false);
+          if(test !== false && test !== null){
+            const f = clause[1];
+            const form = Array.isArray(f) ? [f[0], QQ(x), ...f.slice(1)] : [f, QQ(x)];
+            x = ev(form, env, false);
+          }
+        }
+        return x;
+      }
       case 'case': {
         const v = ev(node[1], env, false);
         for(let i = 2; i < node.length; i++){
@@ -594,21 +685,66 @@ function ev(node, env, tail){
         return null;
       }
       case 'try': {
-        const last = node[node.length - 1];
-        const hasCatch = last && Array.isArray(last) && last[0] instanceof Sym && last[0].name === 'catch';
-        const body = hasCatch ? node.slice(1, node.length - 1) : node.slice(1);
+        let catchClause = null, finallyClause = null;
+        for(let i = 1; i < node.length; i++){
+          const c = node[i];
+          if(Array.isArray(c) && c.length && c[0] instanceof Sym){
+            if(c[0].name === 'catch' && !catchClause) catchClause = c;
+            else if(c[0].name === 'finally' && !finallyClause) finallyClause = c;
+          }
+        }
+        const body = [];
+        for(let i = 1; i < node.length; i++){
+          if(node[i] === catchClause || node[i] === finallyClause) break;
+          body.push(node[i]);
+        }
+        let result, thrown = undefined;
         try {
           let r = null;
           for(const e of body) r = ev(e, env, false);
-          return r;
+          result = r;
         } catch(err) {
-          if(hasCatch){
+          if(catchClause){
             const ne = makeEnv(env);
-            ne.vars[last[1].name] = (err && err.message) ? err.message : String(err);
-            return ev(last[2], ne, tail);
+            ne.vars[catchClause[1].name] = (err && err.message) ? err.message : String(err);
+            result = ev(catchClause[2], ne, false);
+          } else {
+            thrown = err;
           }
-          throw err;
         }
+        if(finallyClause){ for(let i = 1; i < finallyClause.length; i++) ev(finallyClause[i], env, false); }
+        if(thrown) throw thrown;
+        return result;
+      }
+      case 'assert': {
+        const ok = ev(node[1], env, false);
+        if(ok === false || ok === null){
+          let msg = '断言失败';
+          if(node.length > 2){
+            const parts = [];
+            for(let i = 2; i < node.length; i++) parts.push(lispStr(ev(node[i], env, false)));
+            msg = parts.join(' ');
+          }
+          throw lispError('assert: ' + msg, node);
+        }
+        return true;
+      }
+      case 'defonce': {
+        const target = node[1];
+        if(!(target instanceof Sym)) throw lispError('defonce 需要符号名', node);
+        if(envGet(env, target.name) !== undefined) return target;
+        const val = ev(node[2], env, false);
+        envSet(env, target.name, val);
+        return target;
+      }
+      case 'declare': {
+        for(let i = 1; i < node.length; i++){
+          const s = node[i];
+          // 注意：必须置为 null(nil) 而非 undefined——否则 envGet 无法区分
+          // “已前向声明”和“未定义”，ev 会在求值时抛“未定义符号”。
+          if(s instanceof Sym && envGet(env, s.name) === undefined) envSet(env, s.name, null);
+        }
+        return null;
       }
       case 'defmodule': {
         const mname = node[1].name;
@@ -710,6 +846,28 @@ function setupBuiltins(env){
       [new Sym('cons'), [new Sym('quote'), new Sym('begin')], new Sym('body')]]], env);
   DOCS['when']   = '条件宏：当 test 为真时顺序求值体(begin)并返回末值，否则返回 null。例 (when (> 3 2) (print "yes") 42) => 42';
   DOCS['unless'] = '条件宏：当 test 为假时顺序求值体(begin)并返回末值，否则返回 null（与 when 相反）。例 (unless false 7) => 7';
+  // ---- ci279–ci323: 新增特殊形式/谓词的文档 + 既有函数缺失文档补全（自省可观测性）----
+  DOCS['when-let'] = '绑定宏：(when-let (名 表达式) 体 …) 先求值表达式，非 nil 时把名绑定到该值并求值体，否则返回 null。例 (when-let (x (car (list 1))) (+ x 1)) => 2';
+  DOCS['if-let']   = '绑定宏：(if-let (名 表达式) 真分支 [假分支]) 非 nil 走真分支，否则走假分支。例 (if-let (x (member 2 (list 1 2))) x 0) => (2)';
+  DOCS['doto']     = '线程副作用宏：(doto x (f a) (g)) 依次以 x 为第一参数调用各表单，返回 x。例 (doto (atom 0) (swap! + 1) (swap! + 2)) => #<atom>';
+  DOCS['as->']     = '显式占位线程宏：(as-> expr 名 表单 …) 把 expr 绑定到名，在后续表单中把名的出现替换为当前值，返回末值。例 (as-> 5 x (+ x 1) (* x 2)) => 12';
+  DOCS['some->']   = 'nil 短路线程宏：(some-> x (f) (g)) 用 -> 方式逐步线程，任一步为 nil 立即返回 nil。例 (some-> (list 1 2) rest first) => 2、(some-> () rest first) => ()';
+  DOCS['some->>']  = 'nil 短路线程宏(尾插)：(some->> x (f) (g)) 用 ->> 方式线程，遇 nil 短路。例 (some->> 3 (list) (map inc)) => (4)';
+  DOCS['cond->']   = '条件线程宏：(cond-> x (测试 表单) …) 每个测试为真时按 -> 方式应用表单，返回最终值。例 (cond-> 0 (#t (+ 1)) (#f (* 2))) => 1';
+  DOCS['try']      = '异常捕获：(try 体 … (catch 变量 处理器) [(finally 清理)] )，finally 无论是否异常都会执行。';
+  DOCS['assert']   = '断言：(assert 测试 [消息 …]) 测试为 nil/false 时抛出带消息的错误，否则返回 #t。';
+  DOCS['defonce']  = '幂等定义：(defonce 名 表达式) 仅当名尚未定义时绑定，已定义则跳过（重复加载安全）。';
+  DOCS['declare']  = '前向声明：(declare 名 …) 预先把名字置为未定义，便于互相递归引用而不必 letrec。';
+  DOCS['atom?']    = '类型判定：(atom? x) 当 x 是由 atom 创建的原子时为真。';
+  DOCS['reduce']   = '归约：用函数把列表累积为单个值：(reduce f init xs) 等价于 (foldl f init xs)。例 (reduce + 0 (list 1 2 3)) => 6';
+  DOCS['reverse']  = '反转列表：(reverse xs) 返回反转后的新列表(不修改原列表)。例 (reverse (list 1 2 3)) => (3 2 1)';
+  DOCS['last']     = '取列表最后一个元素；空列表返回 null。例 (last (list 1 2 3)) => 3';
+  DOCS['flatten']  = '把任意嵌套列表拍平为一维列表：(flatten xs) 递归展开所有子列表。例 (flatten (quote (1 (2 (3))))) => (1 2 3)';
+  DOCS['foldl']    = '从左折叠：(foldl f init xs) 以 init 为初值依次用 f 累积。例 (foldl + 0 (list 1 2 3)) => 6';
+  DOCS['foldr']    = '从右折叠：(foldr f init xs) 以 init 为初值从右端累积。例 (foldr cons () (list 1 2 3)) => (1 2 3)';
+  DOCS['map']      = '映射：对列表每个元素应用函数，返回新列表：(map f xs)。例 (map inc (list 1 2)) => (2 3)';
+  DOCS['filter']   = '过滤：保留谓词为真的元素：(filter p xs)。例 (filter even? (list 1 2 3 4)) => (2 4)';
+  DOCS['for-each'] = '遍历：(for-each f xs) 对每个元素调用 f（忽略返回值，仅副作用），返回 null。';
   // ---- 宏调试与卫生 ----
   const STOP_Q = new Set(['quote','quasiquote','unquote','unquote-splicing']);
   // 仅展开头部一次（若头部是已定义宏），否则原样返回
@@ -789,13 +947,14 @@ function setupBuiltins(env){
   def('abs', (a)=> Math.abs(a));
   def('print', (...a)=> a.map(lispStr).join(' '));
   def('range', (a, b, step)=> {
+    if(step === 0) throw lispError('range: step 不能为 0（否则无法推进序列）');
     if(b === undefined){ const r=[]; for(let i=0;i<a;i++) r.push(i); return r; }
     const st = (step === undefined) ? 1 : step;
     const r = [];
     if(st > 0){ for(let i=a; i<b; i+=st) r.push(i); }
     else if(st < 0){ for(let i=a; i>b; i+=st) r.push(i); }
     return r;
-  });
+  }, '生成整数序列：(range n) 为 0..n-1；(range a b [step]) 从 a 起、步长 step（不可为 0）直到越过 b。例 (range 3) => (0 1 2)、(range 1 5 2) => (1 3)');
   def('length', (x)=> Array.isArray(x) ? x.length : (typeof x==='string' ? x.length : 0));
   def('map', (f,l)=> Array.isArray(l) ? l.map(x=>applyFn(f,[x])) : []);
   def('filter', (f,l)=> Array.isArray(l) ? l.filter(x=>applyFn(f,[x])) : []);
@@ -812,7 +971,10 @@ function setupBuiltins(env){
     for(const x of l){ acc = applyFn(f, [acc, x]); r.push(acc); }
     return r;
   }, '前缀累积(reductions)：(scan f init xs) 返回从 init 起每一步用 f 累积的结果列表(含初始值)，长度 = len(xs)+1；常用于生成前缀和/前缀积。例 (scan + 0 \'(1 2 3)) => (0 1 3 6)');
-  def('apply', (f,l)=> applyFn(f, Array.isArray(l)?l:[]));
+  def('apply', (f,l)=> {
+    if(!Array.isArray(l)) throw lispError('apply 期望列表作为第二参数，得到: ' + lispStr(l));
+    return applyFn(f, l);
+  }, '把函数应用到参数列表：(apply f (list a b …)) 等价于 (f a b …)；第二参数必须是列表，否则报错。例 (apply + (list 1 2 3)) => 6');
 
   // 函数组合：返回新函数 (comp f g h) => x => f(g(h(x)))，参数透传给最右侧函数
   def('comp', (...fns) => {
@@ -924,6 +1086,7 @@ function setupBuiltins(env){
   def('deref', (a)=> (a instanceof Atom) ? a.value : (function(){ throw lispError('deref 需要 atom'); })(), '取原子当前值。');
   def('reset!', (a, v)=> { if(!(a instanceof Atom)) throw lispError('reset! 需要 atom'); a.value = v; return v; }, '将原子值重设为 v，返回 v。');
   def('swap!', (a, f, ...args)=> { if(!(a instanceof Atom)) throw lispError('swap! 需要 atom'); a.value = applyFn(f, [a.value, ...args]); return a.value; }, '以函数 f 更新原子：新值 = f(当前值, ...args)，返回新值。例 (swap! a + 1) 或 (swap! a (lambda (v) (* v 2)))。');
+  def('atom?', (x)=> x instanceof Atom, '判断是否为状态原子(atom)：(atom? a) 当 a 由 atom 创建时为真。例 (atom? (atom 0)) => #t、(atom? 5) => #f');
 
   // 字典组合：合并 / 更新 / 嵌套取值
   def('merge', (d1, d2)=> {
@@ -1102,6 +1265,7 @@ function setupBuiltins(env){
     let i = 0, out = ''; const s = String(fmt);
     for(let k=0;k<s.length;k++){
       if(s[k] === '~'){
+        if(k + 1 >= s.length){ out += '~'; break; }   // 行尾单独的 ~ 视为字面量，避免输出 "undefined"
         const c = s[k+1]; k++;
         if(c === 'a') out += (i<args.length ? lispStr(args[i++]) : '~a');
         else if(c === 's') out += (i<args.length ? String(args[i++]) : '~s');
@@ -1112,13 +1276,13 @@ function setupBuiltins(env){
       } else out += s[k];
     }
     return out;
-  });
+  }, '格式化字符串：~a=值字面量, ~s=原串, ~d=数字, ~%=换行, ~~=~, 行尾单独 ~ 视为字面量。例 (format "x=~a" 42) => "x=42"');
 
   // ---- 列表增强 ----
-  def('list-ref', (l, i)=> Array.isArray(l) ? (l[i] ?? null) : null);
+  def('list-ref', (l, i)=> Array.isArray(l) ? (i >= 0 && i < l.length ? l[i] : null) : null, '按索引取列表元素(0 基)；下标越界或为负返回 null（不再回绕到末尾）。例 (list-ref (list 1 2 3) 1) => 2、(list-ref (list 1) 5) => ()');
   def('reverse', (l)=> Array.isArray(l) ? l.slice().reverse() : []);
-  def('take', (l, n)=> Array.isArray(l) ? l.slice(0, n) : []);
-  def('nth', (l, i)=> Array.isArray(l) ? (l[i] ?? null) : null);
+  def('take', (l, n)=> Array.isArray(l) ? l.slice(0, Math.max(0, n|0)) : [], '取列表前 n 个元素(新列表)；n 为负时按 0 处理。例 (take (list 1 2 3 4) 2) => (1 2)');
+  def('nth', (l, i)=> Array.isArray(l) ? (i >= 0 && i < l.length ? l[i] : null) : null, '按索引取列表元素(0 基)；下标越界或为负返回 null（不应回绕到末尾）。例 (nth (list 1 2 3) 0) => 1、(nth (list 1 2 3) 9) => ()');
   // 序列工具补全：排序 / 切片 / 取尾 / 取末 / 扁平化 / 谓词聚合
   def('sort', (l, cmp)=> {
     if(!Array.isArray(l)) return [];
@@ -1176,7 +1340,7 @@ function setupBuiltins(env){
     for(const x of l){ const v = applyFn(pred, [x]); if(v === false || v === null) return true; }
     return false;
   }, 'every? 的否定：存在元素不满足 pred 时返回 #t（空列表为 #f）。例 (not-every? even? (list 2 3)) => #t');
-  def('drop', (l, n)=> Array.isArray(l) ? l.slice(n) : []);
+  def('drop', (l, n)=> Array.isArray(l) ? l.slice(Math.max(0, n|0)) : [], '丢弃列表前 n 个元素，返回剩余(新列表)；n 为负时按 0 处理。例 (drop (list 1 2 3 4) 2) => (3 4)');
   def('last', (l)=> (Array.isArray(l) && l.length) ? l[l.length-1] : null);
   def('flatten', (l)=> {
     const out = [];
@@ -1648,7 +1812,7 @@ function setupBuiltins(env){
   def('string-upper', (s)=> String(s).toUpperCase(), '转为大写：(string-upper s) 返回 s 的全大写形式。例 (string-upper "Hi") => "HI"');
   def('string-lower', (s)=> String(s).toLowerCase(), '转为小写：(string-lower s) 返回 s 的全小写形式。例 (string-lower "Hi") => "hi"');
   def('replicate', (n, x)=>{ const m = Math.max(0, Math.trunc(Number(n))); const out = []; for(let i = 0; i < m; i++) out.push(x); return out; }, '重复构造列表：(replicate n x) 返回含 n 个 x 的列表。例 (replicate 3 0) => (0 0 0)');
-  def('cycle', (n, l)=>{ if(!Array.isArray(l)) return []; const out = [], m = Math.max(0, Math.trunc(Number(n))); for(let i = 0; i < m; i++) out.push(l[i % l.length]); return out; }, '循环取样：(cycle n l) 从 l 循环取前 n 个元素(不足则从头复用)。例 (cycle 5 (list 1 2)) => (1 2 1 2 1)');
+  def('cycle', (n, l)=>{ if(!Array.isArray(l) || l.length === 0) return []; const out = [], m = Math.max(0, Math.trunc(Number(n))); for(let i = 0; i < m; i++) out.push(l[i % l.length]); return out; }, '循环取样：(cycle n l) 从 l 循环取前 n 个元素(不足则从头复用)；l 为空或 n<=0 返回空列表(不再推入 undefined)。例 (cycle 5 (list 1 2)) => (1 2 1 2 1)、(cycle 3 (list)) => ()');
   def('pad', (n, x, l)=>{ if(!Array.isArray(l)) return []; const out = l.slice(); while(out.length < Math.max(0, Math.trunc(Number(n)))) out.push(x); return out; }, '右侧补齐长度：(pad n x l) 在 l 末尾用 x 补齐至长度 n(已够长则原样)。例 (pad 5 0 (list 1 2)) => (1 2 0 0 0)');
 
   // ---- 列表/谓词 补充工具 ----
