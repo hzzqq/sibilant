@@ -2,7 +2,7 @@
 
 > 从零手写的 Lisp 解释器：词法分析 → 递归下降解析 → 树遍历求值 + 词法作用域闭包。带宏系统、尾递归优化（TCO）、模式匹配、哈希表、行号定位的运行时错误回溯，以及一个暗色 REPL。
 
-![tech](https://img.shields.io/badge/Lisp-Interpreter-c792ea) ![tco](https://img.shields.io/badge/TCO-trampoline-yellow) ![tests](https://img.shields.io/badge/tests-377-brightgreen) ![license](https://img.shields.io/badge/license-MIT-green)
+![tech](https://img.shields.io/badge/Lisp-Interpreter-c792ea) ![tco](https://img.shields.io/badge/TCO-trampoline-yellow) ![tests](https://img.shields.io/badge/tests-942-brightgreen) ![license](https://img.shields.io/badge/license-MIT-green)
 
 ---
 
@@ -58,6 +58,8 @@ node _partial_test.js # 6/6
 node _dotimes_test.js # 7/7
 node _predicates_test.js # 25/25
 node _load_test.js  # 6/6
+node _distinctby_test.js # 18/18
+node _peek_test.js   # 21/21
 ```
 
 ## 📝 示例

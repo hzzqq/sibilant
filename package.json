@@ -7,7 +7,7 @@
     "cli": "node run.js",
     "repl": "python -m http.server 8080",
     "start": "node run.js",
-    "test": "node _accessors_test.js && node _cli_test.js && node _collutil_test.js && node _combinators_test.js && node _comp_test.js && node _complement_test.js && node _compose_test.js && node _divmod_windows_test.js && node _dotimes_test.js && node _empty_type_vec_test.js && node _final_stdlib_test.js && node _listpred_test.js && node _load_test.js && node _mathstr_test.js && node _partial_test.js && node _predicates_test.js && node _query_test.js && node _rand_parse_set_test.js && node _reshape_test.js && node _scan_test.js && node _seq2_test.js && node _seq3_test.js && node _seq_test.js && node _setops_test.js && node _smoke.js && node _stats_test.js && node _strchar_test.js && node _trig_tail_test.js"
+    "test": "node _smoke.js && node _cli_test.js && node _comp_test.js && node _partial_test.js && node _dotimes_test.js && node _predicates_test.js && node _load_test.js && node _complement_test.js && node _query_test.js && node _seq_test.js && node _compose_test.js && node _seq2_test.js && node _seq3_test.js && node _accessors_test.js && node _stats_test.js && node _setops_test.js && node _combinators_test.js && node _trig_tail_test.js && node _divmod_windows_test.js && node _reshape_test.js && node _mathstr_test.js && node _listpred_test.js && node _collutil_test.js && node _strchar_test.js && node _rand_parse_set_test.js && node _empty_type_vec_test.js && node _final_stdlib_test.js && node _strcoll_test.js && node _containers_test.js && node _atom_test.js && node _seqpred_test.js && node _rand_test.js && node _distinctby_test.js && node _peek_test.js"
   },
   "keywords": [
     "lisp",

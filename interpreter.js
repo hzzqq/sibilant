@@ -36,6 +36,9 @@ class LSet {
 
 // 树（n 叉树）：每个节点含 value + children（LTree 数组）。不可变：构造即定型，
 // tree-map / tree-insert 返回新树。用于层级数据、AST、目录树等。
+class Atom {                                          // 可变状态原子：唯余一个 value 字段
+  constructor(v){ this.value = (v === undefined ? null : v); }
+}
 class LTree {
   constructor(value, children){ this.value = value; this.children = children || []; }
 }
@@ -796,6 +799,8 @@ function setupBuiltins(env){
   def('length', (x)=> Array.isArray(x) ? x.length : (typeof x==='string' ? x.length : 0));
   def('map', (f,l)=> Array.isArray(l) ? l.map(x=>applyFn(f,[x])) : []);
   def('filter', (f,l)=> Array.isArray(l) ? l.filter(x=>applyFn(f,[x])) : []);
+  // concat：连接多个序列（列表/单元素）为一个新列表；(concat (list 1 2) (list 3) 4) => (1 2 3 4)
+  def('concat', (...ls)=> { const out = []; for(const x of ls){ if(Array.isArray(x)) out.push(...x); else if(x !== null && x !== undefined) out.push(x); } return out; }, '连接多个序列为一个新列表：列表展开并拼接，单元素直接追加。例 (concat (list 1 2) (list 3 4)) => (1 2 3 4)、(concat (list 1) 2) => (1 2)');
   def('reduce', (f,init,l)=> Array.isArray(l) ? l.reduce((a,x)=>applyFn(f,[a,x]), init) : init);
   // complement（谓词取反）：返回新谓词，调用 f 后对结果取逻辑非(Sibilant 中 false/null 视为假)。
   // 例 (filter (complement even?) (list 1 2 3)) => (1 3)
@@ -876,6 +881,50 @@ function setupBuiltins(env){
   def('dict-keys', (d)=> (d instanceof Dict) ? d.keys() : []);
   def('dict-vals', (d)=> (d instanceof Dict) ? d.vals() : []);
   def('dict-len', (d)=> (d instanceof Dict) ? d.len : 0);
+  // ---- 通用容器工具：keys / vals / count / dissoc / str（多态于 dict/set/序列）----
+  def('keys', (c)=> {
+    if(c instanceof Dict) return c.keys();
+    if(c instanceof LSet) return c.keys();
+    if(Array.isArray(c)) { const r=[]; for(let i=0;i<c.length;i++) r.push(i); return r; }
+    if(typeof c === 'string'){ const r=[]; for(let i=0;i<c.length;i++) r.push(i); return r; }
+    throw lispError('keys 需要 dict/set/序列');
+  }, '返回容器键集合：dict 返回键列表、set 返回元素、序列(列表/字符串)返回 0 基索引。例 (keys (dict (quote a) 1)) => (a)。');
+  def('vals', (c)=> {
+    if(c instanceof Dict) return c.vals();
+    if(c instanceof LSet) return c.keys();
+    if(Array.isArray(c)) return c.slice();
+    if(typeof c === 'string') return c.split('');
+    throw lispError('vals 需要 dict/set/序列');
+  }, '返回容器值集合：dict 返回值列表、set 返回元素、列表返回其自身拷贝、字符串返回字符列表。例 (vals (dict (quote a) 1)) => (1)。');
+  def('count', (c)=> {
+    if(c instanceof Dict || c instanceof LSet) return c.len;
+    if(Array.isArray(c) || typeof c === 'string') return c.length;
+    if(c === null || c === undefined) return 0;
+    return 1;
+  }, '返回元素个数：dict/set 取元素数、列表/字符串取长度、nil 取 0、其他原子取 1。例 (count (list 1 2 3)) => 3。');
+  def('dissoc', (d, ...ks)=> {
+    if(!(d instanceof Dict) && !(d instanceof LSet)) throw lispError('dissoc 需要 dict/set');
+    let r = d._clone();
+    for(const k of ks) r = r.del(k);
+    return r;
+  }, '从 dict/set 中移除若干键，返回新容器(原容器不变)。例 (dissoc (dict (quote a) 1 (quote b) 2) (quote a)) => #{b 2}。');
+  function _strOf(x){
+    if(x === null || x === undefined) return '';
+    if(typeof x === 'string') return x;
+    if(typeof x === 'boolean') return x ? 'true' : 'false';
+    if(typeof x === 'number') return String(x);
+    if(Array.isArray(x)) return x.map(_strOf).join('');
+    if(x instanceof Dict) return '{' + x.keys().map((k,i)=> _strOf(k) + ' ' + _strOf(x.vals()[i])).join(', ') + '}';
+    if(x instanceof LSet) return '#{' + x.keys().map(_strOf).join(' ') + '}';
+    return lispStr(x);
+  }
+  def('str', (...args)=> args.map(_strOf).join(''), '将任意参数拼接为字符串：nil 视为空串、布尔转 true/false、列表/字典/集合递归展开。例 (str "a" 1 (list 2 3)) => "a123"。');
+  // ---- 可变状态原子（atom / deref / reset! / swap!）----
+  def('atom', (v)=> new Atom(v), '创建可变状态原子(atom)，初始值为 v(nil 则取 null)。deref 取当前值、reset! 设值、swap! 以函数更新。例 (def a (atom 0)) (swap! a + 1) => 1。');
+  def('deref', (a)=> (a instanceof Atom) ? a.value : (function(){ throw lispError('deref 需要 atom'); })(), '取原子当前值。');
+  def('reset!', (a, v)=> { if(!(a instanceof Atom)) throw lispError('reset! 需要 atom'); a.value = v; return v; }, '将原子值重设为 v，返回 v。');
+  def('swap!', (a, f, ...args)=> { if(!(a instanceof Atom)) throw lispError('swap! 需要 atom'); a.value = applyFn(f, [a.value, ...args]); return a.value; }, '以函数 f 更新原子：新值 = f(当前值, ...args)，返回新值。例 (swap! a + 1) 或 (swap! a (lambda (v) (* v 2)))。');
+
   // 字典组合：合并 / 更新 / 嵌套取值
   def('merge', (d1, d2)=> {
     if(!(d1 instanceof Dict) || !(d2 instanceof Dict)) throw lispError('merge 需要两个 dict');
@@ -1116,6 +1165,17 @@ function setupBuiltins(env){
     for(const x of l){ const v = applyFn(pred, [x]); if(v !== false && v !== null) return x; }
     return false;
   }, '返回列表中首个使 pred 为真的元素值；全为假则返回 #f。例 (some even? (list 1 3 4)) => 4、(some odd? (list 2 4)) => #f');
+  // every?：所有元素满足谓词则 #t，否则 #f（空列表恒真）
+  def('every?', (pred, l)=> {
+    if(!Array.isArray(l)) return true;
+    for(const x of l){ const v = applyFn(pred, [x]); if(v === false || v === null) return false; }
+    return true;
+  }, '判定列表中所有元素是否满足谓词 pred（空列表恒为真）；任一为假则返回 #f。例 (every? even? (list 2 4)) => #t、(every? even? (list 2 3)) => #f');
+  def('not-every?', (pred, l)=> {
+    if(!Array.isArray(l)) return false;
+    for(const x of l){ const v = applyFn(pred, [x]); if(v === false || v === null) return true; }
+    return false;
+  }, 'every? 的否定：存在元素不满足 pred 时返回 #t（空列表为 #f）。例 (not-every? even? (list 2 3)) => #t');
   def('drop', (l, n)=> Array.isArray(l) ? l.slice(n) : []);
   def('last', (l)=> (Array.isArray(l) && l.length) ? l[l.length-1] : null);
   def('flatten', (l)=> {
@@ -1284,6 +1344,38 @@ function setupBuiltins(env){
     return true;
   }, '超集判定：(superset? a b) 当 b 的每一个元素都属于 a 时返回真(空集是任何集合的超集)。例 (superset? (set 1 2 3) (set 2)) => #t、(superset? (set 1) (set 1 2)) => #f');
   def('distinct?', (l)=> { if(!Array.isArray(l)) return true; const seen = new Set(); for(const e of l){ const k = lispStr(e); if(seen.has(k)) return false; seen.add(k); } return true; }, '判断是否全元素互异(无重复)。例 (distinct? (list 1 2 3)) => #t、(distinct? (list 1 1 2)) => #f');
+  // ---- 高阶序列/谓词组合补充 ----
+  def('distinct-by', (f, l)=> {
+    if(!Array.isArray(l)) return [];
+    const seen = new Set(); const out = [];
+    for(const e of l){ const k = lispStr(applyFn(f, [e])); if(!seen.has(k)){ seen.add(k); out.push(e); } }
+    return out;
+  }, '按键函数去重：(distinct-by f coll) 保留每个 (f 元素) 首次出现的元素。例 (distinct-by (lambda (x) (mod x 3)) (list 1 2 3 4 5)) => (1 2 3)');
+  def('some-fn', (...fns)=> (x)=> {
+    for(const f of fns){ const r = applyFn(f, [x]); if(r !== false && r !== null) return true; }
+    return false;
+  }, '谓词析取：(some-fn p1 p2 …) 返回新谓词，参数 x 只要任一 pi(x) 为真(非 false/null)即返回 #t。例 (filter (some-fn even? pos?) (list -2 -1 0 1)) => (-2 0 1)');
+  def('every-pred', (...fns)=> (x)=> {
+    for(const f of fns){ const r = applyFn(f, [x]); if(r === false || r === null) return false; }
+    return true;
+  }, '谓词合取：(every-pred p1 p2 …) 返回新谓词，仅当全部 pi(x) 为真时返回 #t。例 (filter (every-pred pos? even?) (list 1 2 3 4)) => (2 4)');
+  // ---- 列表首/栈/拼接/循环补充 ----
+  def('peek', (l)=> (Array.isArray(l) && l.length) ? l[0] : null, '取列表首元素(栈顶)，空列表返回 null。例 (peek (list 1 2 3)) => 1');
+  def('pop', (l)=> Array.isArray(l) ? l.slice(1) : [], '弹出列表首元素，剩余为新列表(栈 pop)。例 (pop (list 1 2 3)) => (2 3)');
+  def('list*', (...args)=> {
+    if(args.length === 0) return [];
+    const init = args.slice(0, -1);
+    const last = args[args.length - 1];
+    const tail = Array.isArray(last) ? last : [last];
+    return init.concat(tail);
+  }, '拼接列表(末参为序列则展开)：除最后一个参数外逐个作为元素，最后一个参数若为列表则展开拼接。例 (list* 1 2 (list 3 4)) => (1 2 3 4)、(list* (list 1 2)) => (1 2)');
+  def('rotate', (n, l)=> {
+    if(!Array.isArray(l)) return [];
+    const len = l.length;
+    if(len === 0) return [];
+    const k = ((n|0) % len + len) % len;
+    return l.slice(k).concat(l.slice(0, k));
+  }, '循环左移：(rotate n l) 把列表向左循环移动 n 位(负数右移)。例 (rotate 1 (list 1 2 3 4)) => (2 3 4 1)、(rotate -1 (list 1 2 3 4)) => (4 1 2 3)');
   def('juxt', (...fs)=> (...args)=> fs.map(f => applyFn(f, args)), '将多个函数并置为一个函数：调用时返回各函数作用于同一参数的结果列表。例 ((juxt inc dec) 5) => (6 4)');
   def('keep-indexed', (f, l)=> {
     if(!Array.isArray(l)) return [];
@@ -1297,6 +1389,30 @@ function setupBuiltins(env){
   def('every', (f, l)=> { if(!Array.isArray(l)) return false; for(const e of l) if(!applyFn(f, [e])) return false; return true; }, '全称量词：(every pred coll) 当 coll 中每个元素都满足 pred 时返回真(空集为真)。例 (every pos? (list 1 2 3)) => #t');
   def('rand', ()=> Math.random(), '返回 [0,1) 区间的伪随机浮点数。例 (rand) 形如 0.37…');
   def('rand-int', (n)=> Math.floor(Math.random() * Math.max(0, n|0)), '返回 [0,n) 区间的伪随机整数。例 (rand-int 10) 落在 0..9');
+  // ---- 随机辅助 ----
+  def('rand-nth', (coll)=> {
+    let arr;
+    if(Array.isArray(coll)) arr = coll;
+    else if(coll instanceof LSet) arr = [...coll.keys()];
+    else if(coll instanceof Dict) arr = coll.keys().map(k => [k, coll.get(k)]);
+    else return null;
+    if(arr.length === 0) return null;
+    return arr[Math.floor(Math.random() * arr.length)];
+  }, '从集合中随机取一个元素：(rand-nth coll) 对 list/set/dict 随机返回其中之一，空集合返回 null。例 (rand-nth (list 1 2 3)) 落在 1/2/3 之一');
+  def('shuffle', (coll)=> {
+    let arr;
+    if(Array.isArray(coll)) arr = coll.slice();
+    else if(coll instanceof LSet) arr = [...coll.keys()];
+    else if(coll instanceof Dict) arr = coll.keys().map(k => [k, coll.get(k)]);
+    else return [];
+    for(let i = arr.length - 1; i > 0; i--){ const j = Math.floor(Math.random() * (i + 1)); const t = arr[i]; arr[i] = arr[j]; arr[j] = t; }
+    return arr;
+  }, '随机重排集合(返回新列表，不改原集合)：(shuffle coll) 对 list/set/dict 做 Fisher–Yates 洗牌。例 (shuffle (list 1 2 3)) 为 (1 2 3) 的某种排列');
+  def('repeatedly', (n, f)=> {
+    const k = Math.max(0, n|0); const out = [];
+    for(let i = 0; i < k; i++) out.push(applyFn(f, [], null));
+    return out;
+  }, '重复调用：返回 (f) 连续 n 次的调用结果列表。例 (repeatedly 3 (fn [] 7)) => (7 7 7)；(repeatedly 3 (fn [] (rand-int 10))) 为 3 个随机整数');
   def('parse-int', (s, radix)=> { const r = radix == null ? 10 : (radix|0); const v = parseInt(String(s), r); return isNaN(v) ? null : v; }, '把字符串解析为整数(可选进制 radix，默认 10)，失败返回 null。例 (parse-int "42") => 42、(parse-int "1010" 2) => 10');
   def('parse-float', (s)=> { const v = parseFloat(String(s)); return isNaN(v) ? null : v; }, '把字符串解析为浮点数，失败返回 null。例 (parse-float "3.14") => 3.14');
   def('pr-str', (...a)=> a.map(lispStr).join(' '), '把任意值渲染成 Sibilant 字面量字符串(与打印格式一致)。例 (pr-str (list 1 2)) => "(1 2)"');
@@ -1375,6 +1491,18 @@ function setupBuiltins(env){
   def('string-pad-start', (s, n, ch)=> String(s).padStart(Math.max(0, n|0), ch == null ? ' ' : String(ch)), '在左侧用填充字符 ch(默认空格)补齐到长度 n。例 (string-pad-start "7" 3 "0") => "007"');
   def('string-pad-end', (s, n, ch)=> String(s).padEnd(Math.max(0, n|0), ch == null ? ' ' : String(ch)), '在右侧用填充字符 ch(默认空格)补齐到长度 n。例 (string-pad-end "7" 3 "0") => "700"');
   def('char-at', (s, i)=> { const str = String(s); const c = str[i|0]; return (c === undefined) ? null : c; }, '按索引取字符串第 i 个字符(0 基)，越界返回 null。例 (char-at "abc" 1) => "b"');
+
+  // ---- 字符串/集合补充：连接/大小写/裁剪/空白判定/集合判定 ----
+  def('join', (coll, sep)=> {
+    const s = (sep == null) ? '' : String(sep);
+    if(!Array.isArray(coll)) return '';
+    return coll.map(x => (x == null ? '' : String(x))).join(s);
+  }, '将列表元素用分隔符 sep 连接成字符串；nil 元素视作空串。例 (join (list 1 2 3) ",") => "1,2,3"、(join (list "a" "b") "-") => "a-b"');
+  def('upper', (s)=> String(s).toUpperCase(), '将字符串转为大写。例 (upper "hi") => "HI"');
+  def('lower', (s)=> String(s).toLowerCase(), '将字符串转为小写。例 (lower "HI") => "hi"');
+  def('trim', (s)=> String(s).trim(), '去除字符串首尾空白。例 (trim "  x  ") => "x"');
+  def('blank?', (x)=> x === null || x === undefined || (typeof x === 'string' && x.trim() === '') || (Array.isArray(x) && x.length === 0), '判空/空白：nil/未定义/空或全空白字符串/空列表 均为真。例 (blank? "") => #t、(blank? "  ") => #t、(blank? (list)) => #t、(blank? 5) => #f');
+  def('coll?', (x)=> Array.isArray(x) || (x instanceof LSet) || (x instanceof Dict), '判断是否为集合类型(list/set/dict)。例 (coll? (list 1)) => #t、(coll? (set 1)) => #t、(coll? 5) => #f');
 
   // ---- 列表组合/矩阵工具 ----
   def('transpose', (m)=> {
