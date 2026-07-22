@@ -771,7 +771,14 @@ function setupBuiltins(env){
   def('bool?', (x)=> typeof x==='boolean');
   def('function?', (x)=> typeof x==='function' || (x && x.__lambda) === true);
   def('nil?', (x)=> x===null || (Array.isArray(x) && x.length===0));
-  def('empty?', (x)=> x===null || (Array.isArray(x) && x.length===0) || (typeof x==='string' && x.length===0));
+  def('empty?', (x)=> {
+    if (x === null) return true;
+    if (Array.isArray(x)) return x.length === 0;
+    if (typeof x === 'string') return x.length === 0;
+    if (x instanceof LSet) return x.len === 0;
+    if (x instanceof Dict) return x.len === 0;
+    return false;
+  }, '判断是否为空：空列表(含 \'()) / 空字符串 / null / 空集合(set) / 空字典(dict) 均返回真。例 (empty? ()) => #t、(empty? "") => #t、(empty? (set)) => #t、(empty? (dict)) => #t、(empty? (list 1)) => #f');
   def('eq?', (a,b)=> a===b);
   def('equal?', (a,b)=> deepEqual(a,b));
   def('mod', (a,b)=> { if(b===0) throw lispError('mod: 除以零'); return ((a%b)+b)%b; });
@@ -1213,6 +1220,300 @@ function setupBuiltins(env){
     const i = Math.max(0, n | 0);
     return [l.slice(0, i), l.slice(i)];
   }, '在索引 n 处把列表切成前后两段(返回两段组成的列表)。例 (split-at 2 (list 1 2 3 4)) => ((1 2) (3 4))');
+  // ---- 集合/序列补充：子序列、函数式替换、配对、成员、追加、键筛选、带组合合并、字符串切分 ----
+  def('subvec', (coll, start, end)=> {
+    if(!Array.isArray(coll)) return [];
+    const s = Math.max(0, start | 0);
+    if(end === undefined || end === null) return coll.slice(s);
+    return coll.slice(s, Math.max(s, end | 0));
+  }, '取子向量：(subvec coll start [end]) 返回索引 [start,end) 的新列表(不含 end)。例 (subvec (list 1 2 3 4 5) 1 3) => (2 3)');
+  def('replace', (coll, idx, val)=> {
+    if(!Array.isArray(coll)) return [];
+    const i = idx | 0;
+    const out = coll.slice();
+    if(i >= 0 && i < out.length) out[i] = val;
+    return out;
+  }, '函数式替换：(replace coll idx val) 返回新列表，仅把索引 idx 处元素改为 val(原列表不变)；索引越界则原样返回副本。例 (replace (list 1 2 3) 1 9) => (1 9 3)');
+  def('zipmap', (keys, vals)=> {
+    const d = new Dict();
+    if(!Array.isArray(keys) || !Array.isArray(vals)) return d;
+    const n = Math.min(keys.length, vals.length);
+    for(let i = 0; i < n; i++) d.put(keys[i], vals[i], true);
+    return d;
+  }, '将两个等长列表按位配对成 dict：键取自 keys，值取自 vals(以较短者为准)。例 (zipmap (list (quote a) (quote b)) (list 1 2)) => #{a 1 b 2}');
+  def('contains?', (coll, x)=> {
+    if(Array.isArray(coll)) return coll.some(e => lispStr(e) === lispStr(x));
+    if(coll instanceof Dict) return coll.has(x);
+    if(coll instanceof LSet) return coll.has(x);
+    if(typeof coll === 'string') return String(coll).includes(String(x));
+    return false;
+  }, '成员判定：(contains? coll x) 对数组按值(等号语义)、dict/set 按键、字符串按子串返回真。例 (contains? (list 1 2 3) 2) => #t');
+  def('conj', (coll, x)=> {
+    if(Array.isArray(coll)) return [...coll, x];
+    if(coll instanceof Dict){ if(Array.isArray(x) && x.length >= 2) return coll.put(x[0], x[1], false); return coll; }
+    if(coll instanceof LSet) return coll.add(x, false);
+    return [x];
+  }, '追加元素：(conj coll x) 对数组返回末尾追加 x 的新列表；对 dict 以 [k v] 形式写入；对 set 加入 x。例 (conj (list 1 2) 3) => (1 2 3)');
+  def('select-keys', (m, ks)=> {
+    const d = new Dict();
+    if(!(m instanceof Dict) || !Array.isArray(ks)) return d;
+    for(const k of ks){ if(m.has(k)) d.put(k, m.get(k), true); }
+    return d;
+  }, '只保留指定键：(select-keys m ks) 返回新 dict，仅含 ks 中且存在于 m 的键。例 (select-keys (dict (quote a) 1 (quote b) 2) (list (quote a))) => #{a 1}');
+  def('merge-with', (f, d1, d2)=> {
+    if(!(d1 instanceof Dict) || !(d2 instanceof Dict)) throw lispError('merge-with 需要两个 dict');
+    let r = d1._clone();
+    const ks = d2.keys(), vs = d2.vals();
+    for(let i = 0; i < ks.length; i++){
+      if(r.has(ks[i])) r = r.put(ks[i], applyFn(f, [r.get(ks[i]), vs[i]]), false);
+      else r = r.put(ks[i], vs[i], false);
+    }
+    return r;
+  }, '带组合函数的合并：(merge-with f d1 d2) 冲突键用 (f 旧值 新值) 合并，其余直接覆盖，返回新 dict。例 (merge-with + (dict (quote a) 1) (dict (quote a) 2)) => #{a 3}');
+  def('split', (s, sep)=> String(s).split(sep == null ? /\s+/ : String(sep)), '按分隔符把字符串切成列表：sep 省略时按空白切分。例 (split "a,b,c" ",") => (a b c)');
+  // ---- 字符/字符串补充：码点互转、大小写、左右裁剪 ----
+  def('char-code', (ch)=> { const s = String(ch); return s.length ? s.charCodeAt(0) : 0; }, '取字符的 Unicode 码点(取字符串首字符)。例 (char-code "A") => 65');
+  def('code-char', (n)=> { const v = n | 0; return (v >= 0 && v <= 0x10FFFF) ? String.fromCodePoint(v) : ''; }, '由 Unicode 码点还原字符。例 (code-char 65) => "A"');
+  def('capitalize', (s)=> { const t = String(s); return t.length ? t[0].toUpperCase() + t.slice(1).toLowerCase() : ''; }, '首字母大写、其余小写。例 (capitalize "hELLo") => "Hello"');
+  def('string-triml', (s)=> String(s).replace(/^\s+/, ''), '去除左侧(开头)空白。例 (string-triml "  ab") => "ab"');
+  def('string-trimr', (s)=> String(s).replace(/\s+$/, ''), '去除右侧(结尾)空白。例 (string-trimr "ab  ") => "ab"');
+  // ---- 集合/序列补充：超集判定、全互异判定、函数并置、带索引保留 ----
+  def('superset?', (a, b)=> {
+    if(!(a instanceof LSet) || !(b instanceof LSet)) throw lispError('superset? 需要 set');
+    for(const v of b.keys()) if(!a.has(v)) return false;
+    return true;
+  }, '超集判定：(superset? a b) 当 b 的每一个元素都属于 a 时返回真(空集是任何集合的超集)。例 (superset? (set 1 2 3) (set 2)) => #t、(superset? (set 1) (set 1 2)) => #f');
+  def('distinct?', (l)=> { if(!Array.isArray(l)) return true; const seen = new Set(); for(const e of l){ const k = lispStr(e); if(seen.has(k)) return false; seen.add(k); } return true; }, '判断是否全元素互异(无重复)。例 (distinct? (list 1 2 3)) => #t、(distinct? (list 1 1 2)) => #f');
+  def('juxt', (...fs)=> (...args)=> fs.map(f => applyFn(f, args)), '将多个函数并置为一个函数：调用时返回各函数作用于同一参数的结果列表。例 ((juxt inc dec) 5) => (6 4)');
+  def('keep-indexed', (f, l)=> {
+    if(!Array.isArray(l)) return [];
+    const out = [];
+    for(let i = 0; i < l.length; i++){ if(applyFn(f, [i, l[i]])) out.push(l[i]); }
+    return out;
+  }, '保留索引谓词为真的元素：(keep-indexed f l) 对每个 (index element) 应用 f，保留为真者。例 (keep-indexed (lambda (i x) (= i 0)) (list 1 2 3)) => (1)');
+  def('inc', (x)=> x + 1, '返回 x+1。例 (inc 4) => 5');
+  def('dec', (x)=> x - 1, '返回 x-1。例 (dec 4) => 3');
+  // ---- 随机 / 解析 / 输出 / 集合关系补充 ----
+  def('every', (f, l)=> { if(!Array.isArray(l)) return false; for(const e of l) if(!applyFn(f, [e])) return false; return true; }, '全称量词：(every pred coll) 当 coll 中每个元素都满足 pred 时返回真(空集为真)。例 (every pos? (list 1 2 3)) => #t');
+  def('rand', ()=> Math.random(), '返回 [0,1) 区间的伪随机浮点数。例 (rand) 形如 0.37…');
+  def('rand-int', (n)=> Math.floor(Math.random() * Math.max(0, n|0)), '返回 [0,n) 区间的伪随机整数。例 (rand-int 10) 落在 0..9');
+  def('parse-int', (s, radix)=> { const r = radix == null ? 10 : (radix|0); const v = parseInt(String(s), r); return isNaN(v) ? null : v; }, '把字符串解析为整数(可选进制 radix，默认 10)，失败返回 null。例 (parse-int "42") => 42、(parse-int "1010" 2) => 10');
+  def('parse-float', (s)=> { const v = parseFloat(String(s)); return isNaN(v) ? null : v; }, '把字符串解析为浮点数，失败返回 null。例 (parse-float "3.14") => 3.14');
+  def('pr-str', (...a)=> a.map(lispStr).join(' '), '把任意值渲染成 Sibilant 字面量字符串(与打印格式一致)。例 (pr-str (list 1 2)) => "(1 2)"');
+  def('prn', (...a)=> { console.log(a.map(lispStr).join(' ')); return null; }, '打印各参数的字面量形式并换行，返回 null(副作用函数)。例 (prn "hi" 1) 输出 hi 1');
+  def('subset?', (a, b)=> {
+    if(!(a instanceof LSet) || !(b instanceof LSet)) throw lispError('subset? 需要 set');
+    for(const v of a.keys()) if(!b.has(v)) return false;
+    return true;
+  }, '子集判定：(subset? a b) 当 a 的每个元素都属于 b 时返回真(空集是任何集合的子集)。例 (subset? (set 1) (set 1 2)) => #t');
+  const _collToEntries = coll => {
+    const m = new Map();
+    if(coll instanceof LSet){ for(const e of coll.keys()) m.set(lispStr(e), e); }
+    else if(Array.isArray(coll)){ for(const e of coll) m.set(lispStr(e), e); }
+    return m;
+  };
+  def('intersection', (a, b)=> { const A = _collToEntries(a), B = _collToEntries(b); const out = []; for(const [k, v] of A) if(B.has(k)) out.push(v); return out; }, '集合交集：(intersection a b) 返回同时属于两集合的元素组成的列表(按 a 顺序、去重)。例 (intersection (list 1 2 3) (list 2 3 4)) => (2 3)');
+  def('union', (a, b)=> { const seen = new Map(); const add = c => { const m = _collToEntries(c); for(const [k, v] of m) seen.set(k, v); }; add(a); add(b); return [...seen.values()]; }, '集合并集：(union a b) 返回两集合所有元素组成的去重列表。例 (union (list 1 2) (list 2 3)) => (1 2 3)');
+  def('difference', (a, b)=> { const A = _collToEntries(a), B = _collToEntries(b); const out = []; for(const [k, v] of A) if(!B.has(k)) out.push(v); return out; }, '集合差集：(difference a b) 返回属于 a 但不属于 b 的元素列表。例 (difference (list 1 2 3) (list 2)) => (1 3)');
+  def('sym-diff', (a, b)=> { const A = _collToEntries(a), B = _collToEntries(b); const out = []; for(const [k, v] of A) if(!B.has(k)) out.push(v); for(const [k, v] of B) if(!A.has(k)) out.push(v); return out; }, '对称差集：(sym-diff a b) 返回仅属于其中一个集合的元素列表。例 (sym-diff (list 1 2) (list 2 3)) => (1 3)');
+  // ---- 集合构造 / 类型 / 数值补充 ----
+  def('empty', (coll)=> { if(Array.isArray(coll)) return []; if(coll instanceof LSet) return new LSet(); if(coll instanceof Dict) return new Dict(); return []; }, '返回同类型空集合：(empty coll) list→[]、set→空set、dict→空dict。例 (empty (list 1 2)) => ()');
+  def('type', (x)=> { if(x === null || x === undefined) return 'null'; if(typeof x === 'boolean') return 'bool'; if(typeof x === 'number') return 'number'; if(typeof x === 'string') return 'string'; if(Array.isArray(x)) return 'list'; if(x instanceof Dict) return 'dict'; if(x instanceof LSet) return 'set'; return (x && x._isFn) ? 'fn' : typeof x; }, '返回值的类型名：null/bool/number/string/list/dict/set/fn。例 (type 5) => "number"、(type (list)) => "list"');
+  def('vec', (coll)=> { if(Array.isArray(coll)) return coll.slice(); if(coll instanceof LSet) return [...coll.keys()]; if(coll instanceof Dict) return coll.keys().map(k => [k, coll.get(k)]); if(coll == null) return []; return [coll]; }, '将集合转为向量(列表)：(vec s) 对 list 返回副本、set/dict 返回其元素列表。例 (vec (set 1 2)) => (1 2)');
+  def('into', (to, from)=> {
+    if(Array.isArray(to)){
+      if(Array.isArray(from)) return to.concat(from);
+      if(from instanceof LSet) return to.concat([...from.keys()]);
+      if(from instanceof Dict) return to.concat(from.keys().map(k => [k, from.get(k)]));
+      return to;
+    }
+    if(to instanceof Dict){
+      let d = to;
+      const addPair = kv => { if(Array.isArray(kv) && kv.length >= 2) d = d.put(kv[0], kv[1], false); };
+      if(Array.isArray(from)) from.forEach(addPair);
+      else if(from instanceof Dict){ for(const k of from.keys()) d = d.put(k, from.get(k), false); }
+      else if(from instanceof LSet){ for(const e of from.keys()) d = d.put(e, e, false); }
+      return d;
+    }
+    if(to instanceof LSet){ let s = to; const add = c => { if(Array.isArray(c)) c.forEach(e => s.add(e, true)); else if(c instanceof LSet) for(const e of c.keys()) s.add(e, true); else if(c instanceof Dict) for(const k of c.keys()) s.add(k, true); }; add(from); return s; }
+    return to;
+  }, '把 from 的元素并入 to：(into to from) 对 list/dict/set 分别做拼接/合并/并入，返回新集合。例 (into (list 1) (list 2 3)) => (1 2 3)');
+  const _assocIn = (m, ks, v)=> {
+    if(ks.length === 0) return v;
+    const k = ks[0];
+    const child = (m instanceof Dict) ? (m.has(k) ? m.get(k) : null) : (Array.isArray(m) ? m[k] : null);
+    const newChild = _assocIn(child, ks.slice(1), v);
+    if(m instanceof Dict) return m.put(k, newChild);
+    if(Array.isArray(m)){ const a = m.slice(); a[k] = newChild; return a; }
+    return new Dict().put(k, newChild);   // 路径缺失：为下一层建空 Dict 继续嵌套
+  };
+  const _dissocIn = (m, ks)=> {
+    if(ks.length === 0) return m;
+    const k = ks[0];
+    if(ks.length === 1){
+      if(m instanceof Dict){ const nd = new Dict(); for(const kk of m.keys()) if(kk !== k) nd.put(kk, m.get(kk), false); return nd; }
+      if(Array.isArray(m)){ const a = m.slice(); a.splice(k, 1); return a; }
+      return m;
+    }
+    const child = (m instanceof Dict) ? (m.has(k) ? m.get(k) : null) : (Array.isArray(m) ? m[k] : null);
+    const newChild = _dissocIn(child, ks.slice(1));
+    return (m instanceof Dict) ? m.put(k, newChild) : (Array.isArray(m) ? (()=>{ const a = m.slice(); a[k] = newChild; return a; })() : newChild);
+  };
+  def('assoc-in', (m, ks, v)=> _assocIn(m, ks, v), '嵌套写入：(assoc-in m (k1 …) v) 沿路径创建/更新嵌套结构，返回新集合(原值不变)。例 (assoc-in (dict) (list (quote a) (quote b)) 9) => #{a #{b 9}}');
+  def('dissoc-in', (m, ks)=> _dissocIn(m, ks), '嵌套删除：(dissoc-in m (k1 …)) 沿路径删除最内层键，返回新集合。例 (dissoc-in (dict (quote a) (dict (quote b) 1)) (list (quote a) (quote b))) => #{a #{}}');
+  def('rem', (a, b)=> { const B = b|0; if(B === 0) return 0; return a - Math.trunc(a/B)*B; }, '取模余数(符号跟随被除数，同 JS %)：(rem a b) => a - trunc(a/b)*b。例 (rem 7 3) => 1、(rem -7 3) => -1');
+  def('quot', (a, b)=> { const B = b|0; if(B === 0) return 0; return Math.trunc(a / B); }, '整数除法(向零取整)：(quot a b) => trunc(a/b)。例 (quot 7 3) => 2、(quot -7 3) => -2');
+  def('atan', (a, b)=> { if(b == null) return Math.atan(a); return Math.atan2(a, b); }, '反正切：单参 atan(x)；双参 atan(y x) 返回四象限角度。例 (atan 1) => 0.785…、(atan 1 0) => 1.570…');
+  // ---- 嵌套存取 / 反转 / 判空补充 ----
+  def('ffirst', (l)=> { if(!Array.isArray(l) || l.length === 0) return null; const f = l[0]; return (Array.isArray(f) && f.length) ? f[0] : null; }, '取嵌套列表的「首首」元素：(ffirst l) 返回 (first l) 的首元素。例 (ffirst (list (list 1 2) 3)) => 1、(ffirst (list (list) 3)) => null');
+  def('fnext', (l)=> { if(!Array.isArray(l) || l.length === 0) return []; const f = l[0]; return (Array.isArray(f) && f.length > 1) ? f.slice(1) : []; }, '取嵌套列表「首元素之余」：(fnext l) 返回 (first l) 去掉首元素后的余部。例 (fnext (list (list 1 2) 3)) => (2)');
+  def('reversed', (l)=> { if(!Array.isArray(l)) return []; return l.slice().reverse(); }, '返回反转后的新列表(不修改原列表)：(reversed l) 例 (reversed (list 1 2 3)) => (3 2 1)');
+
+  // ---- 字符串工具补全：前缀/后缀判定、补齐、索引 ----
+  def('string-starts-with?', (s, sub)=> String(s).startsWith(String(sub)), '判断字符串是否以指定前缀开头。例 (string-starts-with? "hello" "he") => #t');
+  def('string-ends-with?', (s, sub)=> String(s).endsWith(String(sub)), '判断字符串是否以指定后缀结尾。例 (string-ends-with? "hello" "lo") => #t');
+  def('string-pad-start', (s, n, ch)=> String(s).padStart(Math.max(0, n|0), ch == null ? ' ' : String(ch)), '在左侧用填充字符 ch(默认空格)补齐到长度 n。例 (string-pad-start "7" 3 "0") => "007"');
+  def('string-pad-end', (s, n, ch)=> String(s).padEnd(Math.max(0, n|0), ch == null ? ' ' : String(ch)), '在右侧用填充字符 ch(默认空格)补齐到长度 n。例 (string-pad-end "7" 3 "0") => "700"');
+  def('char-at', (s, i)=> { const str = String(s); const c = str[i|0]; return (c === undefined) ? null : c; }, '按索引取字符串第 i 个字符(0 基)，越界返回 null。例 (char-at "abc" 1) => "b"');
+
+  // ---- 列表组合/矩阵工具 ----
+  def('transpose', (m)=> {
+    if(!Array.isArray(m) || m.length === 0) return [];
+    const rows = m.map(r => Array.isArray(r) ? r : [r]);
+    const ncols = Math.max(...rows.map(r => r.length));
+    const out = [];
+    for(let c = 0; c < ncols; c++){ const col = []; for(const r of rows) col.push(r[c] ?? null); out.push(col); }
+    return out;
+  }, '矩阵转置：输入为列表的列表(每子列表一行)，返回列转行的列表；空行补 null。例 (transpose (list (list 1 2) (list 3 4))) => ((1 3) (2 4))');
+  def('zip-with', (f, a, b)=> {
+    if(!Array.isArray(a) || !Array.isArray(b)) return [];
+    const n = Math.min(a.length, b.length), out = [];
+    for(let i=0;i<n;i++) out.push(applyFn(f, [a[i], b[i]]));
+    return out;
+  }, '并行归约：对两列表同位置元素依次调用 f，返回结果列表(长度取较短者)。例 (zip-with + (list 1 2) (list 10 20)) => (11 22)');
+  def('cartesian-product', (...ls)=> {
+    let acc = [[]];
+    for(const l of ls){ if(!Array.isArray(l)) return []; const next = []; for(const p of acc) for(const x of l) next.push(p.concat([x])); acc = next; }
+    return acc;
+  }, '笛卡尔积：输入多个列表，返回其所有组合的列表(每组合为子列表，顺序与入参一致)。例 (cartesian-product (list 1 2) (list 3 4)) => ((1 3) (1 4) (2 3) (2 4))');
+
+  // ---- 数值与数学(反三角函数) ----
+  def('atan2', (y, x)=> Math.atan2(y, x), '反正切二参数(按象限返回 [-π,π])。例 (atan2 1 0) => 1.5707…、(atan2 0 1) => 0');
+  def('asin', (a)=> Math.asin(a), '反正弦(输入须在 [-1,1]，否则 NaN)。例 (asin 1) => 1.5707…');
+  def('acos', (a)=> Math.acos(a), '反余弦(输入须在 [-1,1]，否则 NaN)。例 (acos 0) => 1.5707…');
+
+  // ---- 列表尾部/索引工具 ----
+  def('take-last', (l, n)=> Array.isArray(l) ? l.slice(Math.max(0, l.length - Math.max(0, n|0))) : [], '取列表末尾 n 个元素(新列表)。例 (take-last (list 1 2 3 4) 2) => (3 4)');
+  def('drop-last', (l, n)=> Array.isArray(l) ? l.slice(0, Math.max(0, l.length - Math.max(0, n|0))) : [], '丢弃列表末尾 n 个元素。例 (drop-last (list 1 2 3 4) 2) => (1 2)');
+  def('enumerate', (l)=> { if(!Array.isArray(l)) return []; const out = []; for(let i=0;i<l.length;i++) out.push([i, l[i]]); return out; }, '给列表每个元素附上从 0 起的索引，返回 (索引 值) 对的列表。例 (enumerate (list "a" "b")) => ((0 "a") (1 "b"))');
+  def('repeat', (x, n)=> { const cnt = Math.max(0, n|0), out = []; for(let i=0;i<cnt;i++) out.push(x); return out; }, '把元素 x 重复 n 次组成列表。例 (repeat 7 3) => (7 7 7)');
+
+  // ---- 数值与数学(补全) ----
+  def('divmod', (a, b)=> {
+    if(b === 0) throw lispError('divmod: 除以零');
+    const q = Math.trunc(a / b);
+    return [q, a - q * b];
+  }, '整除取商与余数：(divmod a b) 返回 (商 余数) 列表(余数符号同 a)。例 (divmod 17 5) => (3 2)、(divmod -17 5) => (-3 -2)');
+  def('trunc', (a)=> Math.trunc(a), '向零截断取整(丢弃小数部分)。例 (trunc -3.7) => -3、(trunc 2.9) => 2');
+
+  // ---- 字符串工具补全 ----
+  def('string-blank?', (s)=> { const t = String(s); return t.length === 0 || t.trim().length === 0; }, '判断字符串是否为空或全部空白。例 (string-blank? "  ") => #t、(string-blank? "a") => #f');
+  def('chars', (s)=> String(s).split(''), '将字符串拆为字符列表(每个元素一个字符)。例 (chars "abc") => ("a" "b" "c")');
+  def('list->string', (l)=> Array.isArray(l) ? l.map(x => typeof x === 'string' ? x : lispStr(x)).join('') : '', '将字符列表拼接为字符串(非字符串元素按 lispStr 渲染)。例 (list->string (chars "hi")) => "hi"');
+
+  // ---- 列表滑动窗口 ----
+  def('windows', (n, l)=> {
+    if(!Array.isArray(l)) return [];
+    const size = Math.max(1, n|0), out = [];
+    if(l.length < size) return [];
+    for(let i=0; i + size <= l.length; i++) out.push(l.slice(i, i + size));
+    return out;
+  }, '滑动窗口：以窗口大小 n 在列表上滑动，返回每个窗口(末窗口起点 = len-n)。例 (windows 2 (list 1 2 3 4)) => ((1 2) (2 3) (3 4))');
+
+  // ---- 列表整形（续）：本批新增 ----
+  def('flatten1', (l)=>{
+    if(!Array.isArray(l)) return [];
+    const out = [];
+    for(const e of l){ if(Array.isArray(e)) for(const x of e) out.push(x); else out.push(e); }
+    return out;
+  }, '仅展平一层。例 (flatten1 (quote ((1 2) (3)))) => (1 2 3)');
+  def('rotate-left', (n, l)=>{
+    if(!Array.isArray(l) || l.length === 0) return [];
+    const k = (((n|0) % l.length) + l.length) % l.length;
+    return l.slice(k).concat(l.slice(0, k));
+  }, '向左旋转 n 位(前 n 个移到末尾)。例 (rotate-left 1 (list 1 2 3 4)) => (2 3 4 1)');
+  def('rotate-right', (n, l)=>{
+    if(!Array.isArray(l) || l.length === 0) return [];
+    const k = (((n|0) % l.length) + l.length) % l.length;
+    return l.slice(l.length - k).concat(l.slice(0, l.length - k));
+  }, '向右旋转 n 位(末 n 个移到开头)。例 (rotate-right 1 (list 1 2 3 4)) => (4 1 2 3)');
+  def('remove', (f, l)=>{
+    if(!Array.isArray(l)) return [];
+    return l.filter(x=>{ const v = applyFn(f, [x]); return v === false || v === null; });
+  }, '剔除谓词为真者(与 filter 互补)。例 (remove even? (list 1 2 3 4)) => (1 3)');
+  def('keep', (f, l)=>{
+    if(!Array.isArray(l)) return [];
+    const out = [];
+    for(const x of l){ const v = applyFn(f, [x]); if(v !== false && v !== null) out.push(v); }
+    return out;
+  }, '对元素映射 f，丢弃 #f/null 结果。例 (keep (lambda (x) (if (> x 2) x #f)) (list 1 2 3 4)) => (3 4)');
+  def('map-indexed', (f, l)=>{
+    if(!Array.isArray(l)) return [];
+    return l.map((x, i)=> applyFn(f, [i, x]));
+  }, '同 map，但回调接收 (索引 元素)。例 (map-indexed (lambda (i x) (+ i x)) (list 10 10 10)) => (10 11 12)');
+  def('foldl1', (f, l)=>{
+    if(!Array.isArray(l) || l.length === 0) return null;
+    let acc = l[0];
+    for(let i=1;i<l.length;i++) acc = applyFn(f, [acc, l[i]]);
+    return acc;
+  }, '从左折叠，首元素作初始累加值(空列表返回 ())。例 (foldl1 + (list 1 2 3 4)) => 10');
+  def('foldr1', (f, l)=>{
+    if(!Array.isArray(l) || l.length === 0) return null;
+    let acc = l[l.length - 1];
+    for(let i=l.length-2;i>=0;i--) acc = applyFn(f, [l[i], acc]);
+    return acc;
+  }, '从右折叠，末元素作初始累加值。例 (foldr1 (lambda (a b) (list a b)) (list 1 2 3)) => (1 (2 3))');
+  def('count-where', (f, l)=>{
+    if(!Array.isArray(l)) return 0;
+    let c = 0; for(const x of l){ const v = applyFn(f, [x]); if(v !== false && v !== null) c++; }
+    return c;
+  }, '统计谓词为真者的个数。例 (count-where even? (list 1 2 3 4)) => 2');
+  def('slice', (start, end, l)=>{
+    if(!Array.isArray(l)) return [];
+    const s = Math.max(0, start|0), e = (end == null) ? l.length : Math.max(s, end|0);
+    return l.slice(s, e);
+  }, '取子列表 [start, end)。例 (slice 1 3 (list 1 2 3 4)) => (2 3)');
+  def('take-nth', (n, l)=>{
+    const step = Math.max(1, n|0);
+    if(!Array.isArray(l)) return [];
+    const out = []; for(let i=0;i<l.length;i+=step) out.push(l[i]);
+    return out;
+  }, '每 n 个取一个(从首个起)。例 (take-nth 2 (list 1 2 3 4 5)) => (1 3 5)');
+
+  // ---- 数值/字符串/列表 补充工具 ----
+  def('factorial', (n)=>{ const v = Math.trunc(Number(n)); if(v < 0) throw lispError('factorial: 负数无阶乘'); let r = 1; for(let i = 2; i <= v; i++) r *= i; return r; }, '阶乘：(factorial n) 返回 n!（n 为非负整数，0!=1）。例 (factorial 5) => 120');
+  def('is-prime', (n)=>{ const v = Math.trunc(Number(n)); if(v < 2) return false; if(v % 2 === 0) return v === 2; for(let i = 3; i * i <= v; i += 2) if(v % i === 0) return false; return true; }, '素数判定：(is-prime n) 返回 n 是否为素数（>=2 且仅被 1 与自身整除）。例 (is-prime 7) => #t、(is-prime 9) => #f');
+  def('negate', (x)=> -Number(x), '取相反数：(negate x) 返回 -x。例 (negate 5) => -5、(negate -3) => 3');
+  def('to-degrees', (r)=> Number(r) * 180 / Math.PI, '弧度转角度：(to-degrees r) 将弧度换算为角度。例 (to-degrees 1.5708) ≈ 90');
+  def('to-radians', (d)=> Number(d) * Math.PI / 180, '角度转弧度：(to-radians d) 将角度换算为弧度。例 (to-radians 180) ≈ 3.14159');
+  def('string-index-of', (s, sub)=> String(s).indexOf(String(sub)), '子串首次出现位置(找不到返回 -1)：(string-index-of s sub) 返回 sub 在 s 中的 0 基索引。例 (string-index-of "hello" "ll") => 2');
+  def('string-repeat', (s, n)=> String(s).repeat(Math.max(0, Math.trunc(Number(n)))), '重复字符串：(string-repeat s n) 将 s 重复 n 次拼接。例 (string-repeat "ab" 3) => "ababab"');
+  def('string-upper', (s)=> String(s).toUpperCase(), '转为大写：(string-upper s) 返回 s 的全大写形式。例 (string-upper "Hi") => "HI"');
+  def('string-lower', (s)=> String(s).toLowerCase(), '转为小写：(string-lower s) 返回 s 的全小写形式。例 (string-lower "Hi") => "hi"');
+  def('replicate', (n, x)=>{ const m = Math.max(0, Math.trunc(Number(n))); const out = []; for(let i = 0; i < m; i++) out.push(x); return out; }, '重复构造列表：(replicate n x) 返回含 n 个 x 的列表。例 (replicate 3 0) => (0 0 0)');
+  def('cycle', (n, l)=>{ if(!Array.isArray(l)) return []; const out = [], m = Math.max(0, Math.trunc(Number(n))); for(let i = 0; i < m; i++) out.push(l[i % l.length]); return out; }, '循环取样：(cycle n l) 从 l 循环取前 n 个元素(不足则从头复用)。例 (cycle 5 (list 1 2)) => (1 2 1 2 1)');
+  def('pad', (n, x, l)=>{ if(!Array.isArray(l)) return []; const out = l.slice(); while(out.length < Math.max(0, Math.trunc(Number(n)))) out.push(x); return out; }, '右侧补齐长度：(pad n x l) 在 l 末尾用 x 补齐至长度 n(已够长则原样)。例 (pad 5 0 (list 1 2)) => (1 2 0 0 0)');
+
+  // ---- 列表/谓词 补充工具 ----
+  def('fourth', (l)=> Array.isArray(l) ? (l[3] ?? null) : null, '取列表第 4 个元素；不足返回空(())。例 (fourth (list 1 2 3 4)) => 4');
+  def('identity', (x)=> x, '恒等函数：(identity x) 原样返回 x。常用于排序/映射的占位。例 (map identity (list 1 2)) => (1 2)');
+  def('constantly', (x)=> (()=> x), '常数函数：(constantly x) 返回一个无论参数都返回 x 的函数。例 (map (constantly 0) (list 1 2 3)) => (0 0 0)');
+  def('some?', (f, l)=> Array.isArray(l) ? l.some(x=>{ const v = applyFn(f, [x]); return v !== false && v !== null; }) : false, '存在判定：(some? f l) 当 l 中存在元素使 (f 元素) 为真(非 false/null)时返回 #t。例 (some? even? (list 1 3 4)) => #t');
+  def('not-any?', (f, l)=> Array.isArray(l) ? !l.some(x=>{ const v = applyFn(f, [x]); return v !== false && v !== null; }) : true, '全否判定：(not-any? f l) 当 l 中没有任何元素使 (f 元素) 为真时返回 #t。例 (not-any? even? (list 1 3 5)) => #t');
+  def('dedupe', (l)=>{ if(!Array.isArray(l)) return []; const out = []; let last = null, has = false; for(const e of l){ const k = JSON.stringify(e); if(!has || k !== last){ out.push(e); last = k; has = true; } } return out; }, '去除相邻重复(保留各段首次)：(dedupe xs) 仅合并连续相等的元素(与 distinct 全量去重不同)。例 (dedupe (list 1 1 2 2 1)) => (1 2 1)');
+  def('intersperse', (sep, l)=>{ if(!Array.isArray(l)) return []; const out = []; for(let i=0;i<l.length;i++){ out.push(l[i]); if(i < l.length-1) out.push(sep); } return out; }, '间隔插入：(intersperse sep l) 在 l 每两个元素之间插入 sep。例 (intersperse 0 (list 1 2 3)) => (1 0 2 0 3)');
+  def('max-by', (f, l)=>{ if(!Array.isArray(l) || l.length === 0) return null; let best = l[0], bv = applyFn(f, [l[0]]); for(let i=1;i<l.length;i++){ const v = applyFn(f, [l[i]]); if(v > bv){ best = l[i]; bv = v; } } return best; }, '按键值取最大：(max-by f l) 返回使 (f x) 最大的元素。例 (max-by (lambda (x) (first x)) (list (list 1 \"a\") (list 3 \"b\") (list 2 \"c\"))) => (3 \"b\")');
+  def('min-by', (f, l)=>{ if(!Array.isArray(l) || l.length === 0) return null; let best = l[0], bv = applyFn(f, [l[0]]); for(let i=1;i<l.length;i++){ const v = applyFn(f, [l[i]]); if(v < bv){ best = l[i]; bv = v; } } return best; }, '按键值取最小：(min-by f l) 返回使 (f x) 最小的元素。例 (min-by (lambda (x) (first x)) (list (list 1 \"a\") (list 3 \"b\") (list 2 \"c\"))) => (1 \"a\")');
 
   // ---- 惰性求值：delay / force / promise? ----
   def('force', (p)=> forcePromise(p));
