@@ -7,7 +7,7 @@
     "cli": "node run.js",
     "repl": "python -m http.server 8080",
     "start": "node run.js",
-    "test": "node _cli_test.js && node _comp_test.js && node _complement_test.js && node _compose_test.js && node _dotimes_test.js && node _load_test.js && node _partial_test.js && node _predicates_test.js && node _query_test.js && node _scan_test.js && node _seq_test.js && node _smoke.js"
+    "test": "node _smoke.js && node _cli_test.js && node _comp_test.js && node _partial_test.js && node _dotimes_test.js && node _predicates_test.js && node _load_test.js && node _complement_test.js && node _query_test.js && node _seq_test.js && node _compose_test.js && node _seq2_test.js && node _seq3_test.js && node _accessors_test.js && node _stats_test.js && node _setops_test.js"
   },
   "keywords": [
     "lisp",

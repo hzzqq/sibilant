@@ -752,6 +752,13 @@ function setupBuiltins(env){
   def('append', (...ls)=>{ let r=[]; for(const l of ls){ if(Array.isArray(l)) r=r.concat(l); else r.push(l); } return r; });
   def('car', (l)=> Array.isArray(l) ? (l[0] ?? null) : null);
   def('cdr', (l)=> Array.isArray(l) ? l.slice(1) : null);
+  // 基础列表访问器(与 car/cdr 互补，贴近常用 Lisp 习惯)
+  def('first', (l)=> Array.isArray(l) ? (l[0] ?? null) : null, '取列表首元素；空列表/非列表返回空(())。例 (first (list 1 2 3)) => 1');
+  def('second', (l)=> Array.isArray(l) ? (l[1] ?? null) : null, '取列表第 2 个元素；不足返回空(())。例 (second (list 1 2 3)) => 2');
+  def('third', (l)=> Array.isArray(l) ? (l[2] ?? null) : null, '取列表第 3 个元素；不足返回空(())。例 (third (list 1 2 3)) => 3');
+  def('rest', (l)=> Array.isArray(l) ? l.slice(1) : [], '返回除首元素外的其余列表(新列表)。例 (rest (list 1 2 3)) => (2 3)');
+  def('butlast', (l)=> Array.isArray(l) ? l.slice(0, -1) : [], '返回除末元素外的其余列表(新列表)。例 (butlast (list 1 2 3)) => (1 2)');
+  def('not-empty', (x)=> !(x===null || (Array.isArray(x) && x.length===0) || (typeof x==='string' && x.length===0)), '判定值是否非空(非空列表/非空字符串/其它非假值均为真)。例 (not-empty (list 1)) => #t、(not-empty (list)) => #f');
   def('null?', (l)=> l===null || (Array.isArray(l) && l.length===0));
   def('list?', (x)=> Array.isArray(x));
   def('number?', (x)=> typeof x==='number');
@@ -900,6 +907,9 @@ function setupBuiltins(env){
   def('set->list', (s)=> (s instanceof LSet) ? s.keys() : []);
   def('set-union', (a, b)=> { if(!(a instanceof LSet) || !(b instanceof LSet)) throw lispError('set-union 需要 set'); const r = a._clone(); for(const v of b.keys()) r.add(v, true); return r; });
   def('set-intersect', (a, b)=> { if(!(a instanceof LSet) || !(b instanceof LSet)) throw lispError('set-intersect 需要 set'); const r = new LSet(); for(const v of a.keys()) if(b.has(v)) r.add(v, true); return r; });
+  def('set-difference', (a, b)=> { if(!(a instanceof LSet) || !(b instanceof LSet)) throw lispError('set-difference 需要 set'); const r = new LSet(); for(const v of a.keys()) if(!b.has(v)) r.add(v, true); return r; }, '集合差集：(set-difference a b) 返回属于 a 但不属于 b 的元素组成的新集合（不可变，不改变入参）。例 (set-difference (set 1 2 3) (set 2 4)) => (set 1 3)');
+  def('set-subset?', (a, b)=> { if(!(a instanceof LSet) || !(b instanceof LSet)) throw lispError('set-subset? 需要 set'); for(const v of a.keys()) if(!b.has(v)) return false; return true; }, '子集判定：(set-subset? a b) 当 a 的每一个元素都属于 b 时返回真（空集是任何集合的子集）。例 (set-subset? (set 1 2) (set 1 2 3)) => #t、(set-subset? (set 1 2) (set 1)) => #f');
+  def('set-symmetric-difference', (a, b)=> { if(!(a instanceof LSet) || !(b instanceof LSet)) throw lispError('set-symmetric-difference 需要 set'); const r = new LSet(); for(const v of a.keys()) if(!b.has(v)) r.add(v, true); for(const v of b.keys()) if(!a.has(v)) r.add(v, true); return r; }, '对称差集：(set-symmetric-difference a b) 返回只属于 a 或只属于 b 的元素（即 (a-b) ∪ (b-a)）。例 (set-symmetric-difference (set 1 2 3) (set 2 3 4)) => (set 1 4)');
 
   // ---- 树 (n 叉树 LTree：value + children，不可变) ----
   def('tree', (value, ...children)=>{ for(const c of children) if(!(c instanceof LTree)) throw lispError('tree 子节点必须是 tree'); return new LTree(value, children); });
@@ -973,6 +983,14 @@ function setupBuiltins(env){
   def('zero?', (a)=> a === 0);
   def('positive?', (a)=> a > 0);
   def('negative?', (a)=> a < 0);
+  def('sum', (l)=> Array.isArray(l) ? l.reduce((a, x)=> a + (Number(x) || 0), 0) : 0, '数值列表求和：(sum xs) 将列表中每个元素当作数字相加(非数字按 0 处理)；空列表返回 0。例 (sum (list 1 2 3 4)) => 10');
+  def('product', (l)=> Array.isArray(l) ? l.reduce((a, x)=> a * (Number(x) || 0), 1) : 1, '数值列表求积：(product xs) 将列表中每个元素当作数字连乘(非数字按 0 处理)；空列表返回 1。例 (product (list 2 3 4)) => 24');
+  def('mean', (l)=> { if(!Array.isArray(l) || l.length === 0) return 0; const s = l.reduce((a,x)=> a + (Number(x)||0), 0); return s / l.length; }, '算术平均值：(mean xs) 返回数值列表的算术平均；空列表返回 0。例 (mean (list 1 2 3 4)) => 2.5');
+  def('median', (l)=> { if(!Array.isArray(l) || l.length === 0) return 0; const a = l.map(x=>Number(x)||0).sort((p,q)=> p-q); const n = a.length, m = n>>1; return n % 2 ? a[m] : (a[m-1] + a[m]) / 2; }, '中位数：(median xs) 升序排序后取中间值；偶数个元素取中间两数的平均。例 (median (list 3 1 2)) => 2、(median (list 4 1 3 2)) => 2.5');
+  def('variance', (l)=> { if(!Array.isArray(l) || l.length < 2) return 0; const a = l.map(x=>Number(x)||0); const m = a.reduce((s,x)=> s+x,0)/a.length; return a.reduce((s,x)=> s+(x-m)*(x-m),0)/(a.length-1); }, '样本方差（无偏，除以 n-1）：(variance xs) 返回数值列表的样本方差；元素不足 2 个返回 0。例 (variance (list 2 4 4 4 5 5 7 9)) ≈ 4.571');
+  def('stdev', (l)=> Math.sqrt((Array.isArray(l) && l.length >= 2) ? (()=>{ const a=l.map(x=>Number(x)||0); const m=a.reduce((s,x)=>s+x,0)/a.length; return a.reduce((s,x)=>s+(x-m)*(x-m),0)/(a.length-1); })() : 0), '样本标准差：(stdev xs) 即 (sqrt (variance xs))；元素不足 2 个返回 0。例 (stdev (list 2 4 4 4 5 5 7 9)) ≈ 2.138');
+  def('clamp', (x, lo, hi)=> { const a = Number(x), b = Number(lo), c = Number(hi); return Math.min(Math.max(a, b), c); }, '将数值限制在闭区间 [lo, hi] 内：(clamp x lo hi) 当 x<lo 取 lo、x>hi 取 hi、否则取 x。例 (clamp 15 0 10) => 10、(clamp -3 0 10) => 0');
+  def('lerp', (a, b, t)=> Number(a) + (Number(b) - Number(a)) * Number(t), '线性插值：(lerp a b t) 返回 a 与 b 按比例 t 插值的结果(等价于 a+(b-a)*t)。例 (lerp 0 10 0.5) => 5、(lerp 0 100 0.25) => 25');
 
   // ---- 字符串 ----
   def('string-append', (...a)=> a.map(x => typeof x==='string' ? x : lispStr(x)).join(''));
@@ -1066,6 +1084,31 @@ function setupBuiltins(env){
     for(let i=0;i<l.length;i+=size) out.push(l.slice(i, i+size));
     return out;
   }, '将列表每 n 个切分为一组子列表(末组不足 n 也保留)。例 (partition 2 (list 1 2 3 4 5)) => ((1 2) (3 4) (5))');
+  def('reductions', (f, init, l)=> {
+    if(!Array.isArray(l)) return [];
+    const out = [init];
+    let acc = init;
+    for(const x of l){ acc = applyFn(f, [acc, x]); out.push(acc); }
+    return out;
+  }, '前缀归约(scanl)：以 init 为初值，依次用 f 累积，返回含初值的每一步结果列表。例 (reductions + 0 (list 1 2 3)) => (0 1 3 6)');
+  def('interpose', (sep, l)=> {
+    if(!Array.isArray(l)) return [];
+    const out = [];
+    for(let i=0;i<l.length;i++){ if(i>0) out.push(sep); out.push(l[i]); }
+    return out;
+  }, '在列表相邻元素间插入 sep。例 (interpose 0 (list 1 2 3)) => (1 0 2 0 3)');
+  def('iterate', (f, x, n)=> {
+    const cnt = (typeof n === 'number' && n >= 0) ? n : 0;
+    const out = [];
+    let cur = x;
+    for(let i=0;i<cnt;i++){ out.push(cur); cur = applyFn(f, [cur]); }
+    return out;
+  }, '从 x 出发对 f 迭代 n 次，返回 n 个元素的序列(含初值)。例 (iterate (lambda (v) (* v 2)) 1 4) => (1 2 4 8)');
+  def('some', (pred, l)=> {
+    if(!Array.isArray(l)) return false;
+    for(const x of l){ const v = applyFn(pred, [x]); if(v !== false && v !== null) return x; }
+    return false;
+  }, '返回列表中首个使 pred 为真的元素值；全为假则返回 #f。例 (some even? (list 1 3 4)) => 4、(some odd? (list 2 4)) => #f');
   def('drop', (l, n)=> Array.isArray(l) ? l.slice(n) : []);
   def('last', (l)=> (Array.isArray(l) && l.length) ? l[l.length-1] : null);
   def('flatten', (l)=> {
@@ -1145,6 +1188,31 @@ function setupBuiltins(env){
     for(let i = 0; any; i++){ any = false; for(const a of arrs){ if(i < a.length){ out.push(a[i]); any = true; } } }
     return out;
   }, '交错合并多个列表(按索引轮流取)。例 (interleave (list 1 2) (list 3 4 5)) => (1 3 2 4 5)');
+
+  // ---- 列表谓词切片 / 扁平化 ----
+  def('take-while', (f, l)=> {
+    if(!Array.isArray(l)) return [];
+    const out = [];
+    for(const x of l){ const v = applyFn(f, [x]); if(v === false || v === null) break; out.push(x); }
+    return out;
+  }, '从列表头部取元素，直到首个使谓词 f 为假(或空)为止(含该元素前所有)。例 (take-while pos? (list 1 2 -1 3)) => (1 2)');
+  def('drop-while', (f, l)=> {
+    if(!Array.isArray(l)) return [];
+    let i = 0;
+    for(; i < l.length; i++){ const v = applyFn(f, [l[i]]); if(v === false || v === null) break; }
+    return l.slice(i);
+  }, '丢弃列表头部使谓词 f 为真的元素，返回首个使 f 为假处及之后的剩余。例 (drop-while pos? (list 1 2 -1 3)) => (-1 3)');
+  def('mapcat', (f, l)=> {
+    if(!Array.isArray(l)) return [];
+    const out = [];
+    for(const x of l){ const r = applyFn(f, [x]); if(Array.isArray(r)) for(const y of r) out.push(y); }
+    return out;
+  }, '对每个元素应用 f，把返回的列表依次拼接(flatMap)。例 (mapcat (lambda (x) (list x x)) (list 1 2)) => (1 1 2 2)');
+  def('split-at', (n, l)=> {
+    if(!Array.isArray(l)) return [[], []];
+    const i = Math.max(0, n | 0);
+    return [l.slice(0, i), l.slice(i)];
+  }, '在索引 n 处把列表切成前后两段(返回两段组成的列表)。例 (split-at 2 (list 1 2 3 4)) => ((1 2) (3 4))');
 
   // ---- 惰性求值：delay / force / promise? ----
   def('force', (p)=> forcePromise(p));
@@ -1309,8 +1377,6 @@ const STDLIB = `
 (define partition (lambda (n xs) (if (null? xs) (list) (cons (take xs n) (partition n (drop xs n))))))
 (define take-while (lambda (p xs) (if (or (null? xs) (not (p (car xs)))) (list) (cons (car xs) (take-while p (cdr xs))))))
 (define drop-while (lambda (p xs) (if (or (null? xs) (not (p (car xs)))) xs (drop-while p (cdr xs)))))
-(define sum (lambda (xs) (foldl + 0 xs)))
-(define product (lambda (xs) (foldl * 1 xs)))
 (define butlast (lambda (xs) (if (null? (cdr xs)) (list) (cons (car xs) (butlast (cdr xs))))))
 (define remove (lambda (p xs) (filter (lambda (x) (not (p x))) xs)))
 (define zipmap (lambda (ks vs) (foldl (lambda (d kv) (dict-set d (car kv) (car (cdr kv)))) (dict) (zip ks vs))))
