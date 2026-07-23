@@ -1216,8 +1216,8 @@ function setupBuiltins(env){
   def('median', (l)=> { if(!Array.isArray(l) || l.length === 0) return 0; const a = l.map(x=>Number(x)||0).sort((p,q)=> p-q); const n = a.length, m = n>>1; return n % 2 ? a[m] : (a[m-1] + a[m]) / 2; }, '中位数：(median xs) 升序排序后取中间值；偶数个元素取中间两数的平均。例 (median (list 3 1 2)) => 2、(median (list 4 1 3 2)) => 2.5');
   def('variance', (l)=> { if(!Array.isArray(l) || l.length < 2) return 0; const a = l.map(x=>Number(x)||0); const m = a.reduce((s,x)=> s+x,0)/a.length; return a.reduce((s,x)=> s+(x-m)*(x-m),0)/(a.length-1); }, '样本方差（无偏，除以 n-1）：(variance xs) 返回数值列表的样本方差；元素不足 2 个返回 0。例 (variance (list 2 4 4 4 5 5 7 9)) ≈ 4.571');
   def('stdev', (l)=> Math.sqrt((Array.isArray(l) && l.length >= 2) ? (()=>{ const a=l.map(x=>Number(x)||0); const m=a.reduce((s,x)=>s+x,0)/a.length; return a.reduce((s,x)=>s+(x-m)*(x-m),0)/(a.length-1); })() : 0), '样本标准差：(stdev xs) 即 (sqrt (variance xs))；元素不足 2 个返回 0。例 (stdev (list 2 4 4 4 5 5 7 9)) ≈ 2.138');
-  def('clamp', (x, lo, hi)=> { const a = Number(x), b = Number(lo), c = Number(hi); return Math.min(Math.max(a, b), c); }, '将数值限制在闭区间 [lo, hi] 内：(clamp x lo hi) 当 x<lo 取 lo、x>hi 取 hi、否则取 x。例 (clamp 15 0 10) => 10、(clamp -3 0 10) => 0');
-  def('lerp', (a, b, t)=> Number(a) + (Number(b) - Number(a)) * Number(t), '线性插值：(lerp a b t) 返回 a 与 b 按比例 t 插值的结果(等价于 a+(b-a)*t)。例 (lerp 0 10 0.5) => 5、(lerp 0 100 0.25) => 25');
+  def('clamp', (x, lo, hi)=> { const a = Number(x), b = Number(lo), c = Number(hi); if(!isFinite(a) || !isFinite(b) || !isFinite(c)) return null; return Math.min(Math.max(a, b), c); }, '将数值限制在闭区间 [lo, hi] 内：(clamp x lo hi) 当 x<lo 取 lo、x>hi 取 hi、否则取 x；任一参数非有限数时返回 null。例 (clamp 15 0 10) => 10、(clamp -3 0 10) => 0、(clamp "x" 0 10) => null');
+  def('lerp', (a, b, t)=> { const x = Number(a), y = Number(b), u = Number(t); if(!isFinite(x) || !isFinite(y) || !isFinite(u)) return null; return x + (y - x) * u; }, '线性插值：(lerp a b t) 返回 a 与 b 按比例 t 插值的结果(等价于 a+(b-a)*t)；任一参数非有限数时返回 null。例 (lerp 0 10 0.5) => 5、(lerp 0 100 0.25) => 25');
 
   // ---- 字符串 ----
   def('string-append', (...a)=> a.map(x => typeof x==='string' ? x : lispStr(x)).join(''));
@@ -1891,12 +1891,14 @@ function setupBuiltins(env){
   // ---- Node 文件 IO / 进程（浏览器环境降级为“不支持”）----
   def('argv', ()=> (typeof process !== 'undefined' && process.argv) ? process.argv.slice(2).map(String) : []);
   def('read-file', (p)=> {
-    if(typeof require !== 'function') throw lispError('read-file 仅在 Node 环境可用');
-    return require('fs').readFileSync(String(p), 'utf8');
+    const R = (typeof require === 'function') ? require : (typeof globalThis !== 'undefined' ? globalThis.require : undefined);
+    if(typeof R !== 'function') throw lispError('read-file 仅在 Node 环境可用');
+    return R('fs').readFileSync(String(p), 'utf8');
   });
   def('write-file', (p, content)=> {
-    if(typeof require !== 'function') throw lispError('write-file 仅在 Node 环境可用');
-    require('fs').writeFileSync(String(p), String(content), 'utf8');
+    const R = (typeof require === 'function') ? require : (typeof globalThis !== 'undefined' ? globalThis.require : undefined);
+    if(typeof R !== 'function') throw lispError('write-file 仅在 Node 环境可用');
+    R('fs').writeFileSync(String(p), String(content), 'utf8');
     return null;
   });
   def('file-exists?', (p)=> {
@@ -1942,6 +1944,8 @@ function setupBuiltins(env){
   D('<=', '小于等于');
   D('>=', '大于等于');
   D('not', '逻辑非：false 或 null 为真，其余为假');
+  D('and', '逻辑与(短路宏)：(and a b …) 依次求值，遇 false/null 即返回它，否则返回最后一个值；全为真时返回末值');
+  D('or', '逻辑或(短路宏)：(or a b …) 依次求值，遇非 false/null 即返回它，否则返回最后一个值；全为假时返回末值(通常为 false)');
   D('while', '条件循环：(while 测试 体 ...) 反复求值体，直到测试为假/null 才停止；返回最后一次体的值（未执行则 null）');
   D('for', '列表遍历：(for 变量 列表 体 ...) 依次把列表每个元素绑定到变量并执行体，返回最后一次体的值');
   D('dotimes', '计数循环：(dotimes (变量 次数) 体 ...) 把计数器从 0 绑到 次数-1 依次执行体，返回最后一次体的值；次数<=0 返回 null');
@@ -1973,6 +1977,7 @@ function setupBuiltins(env){
   D('reduce', '归约：用函数把列表累积为单个值');
   D('apply', '把函数应用到参数列表上');
   D('comp', '函数组合：(comp f g h) 返回新函数，调用时等价于 f(g(h(参数…)))，参数透传给最右函数；零参时返回恒等函数');
+  D('compose', '函数组合(右到左)：(compose f g h) 返回新函数，调用时等价于 f(g(h(参数…)))，与 comp 语义一致；参数透传给最右函数；零参时返回恒等函数');
   D('partial', '偏应用：(partial f a b) 返回新函数，调用时等价于 f(a, b, 余下参数…)，用于固定前若干个参数');
   D('range', '生成整数列表：(range n) 为 0..n-1；(range a b [step]) 为 a 起、步长 step 直到越过 b');
   D('sort', '排序列表：无比较器按数值/字典序；给定 (cmp a b) 谓词则按其正负/真假决定次序');
@@ -1994,6 +1999,8 @@ function setupBuiltins(env){
   D('json-encode', 'JSON 序列化：把 Sibilant 值（数/串/布尔/列表/Dict/Set）转为 JSON 字符串');
   D('json-decode', 'JSON 反序列化：把 JSON 字符串解析为 Sibilant 值（数组→列表、对象→Dict）');
   D('json?', '判断字符串是否为合法 JSON');
+  D('read-file', '读取文本文件：(read-file path) 以 UTF-8 读取文件全部内容并返回字符串(仅在 Node 环境可用，浏览器降级为抛错)');
+  D('write-file', '写入文本文件：(write-file path content) 以 UTF-8 把 content 写入文件(覆盖)，成功返回 null(仅在 Node 环境可用)');
 
   // ===== 自驱循环新增内置（ci247~ci275）=====
   // ---- ci247: 序列切片 ----
@@ -2185,6 +2192,57 @@ function setupBuiltins(env){
   def('url-encode', (s)=> encodeURIComponent(String(s)), 'URL 编码：(url-encode s) 按 encodeURIComponent 编码(空格->%20 等)。例 (url-encode "a b&c") => "a%20b%26c"');
   def('url-decode', (s)=> { try { return decodeURIComponent(String(s)); } catch(e){ return String(s); } }, 'URL 解码：(url-decode s) 按 decodeURIComponent 解码；非法序列安全回退为原串。例 (url-decode "a%20b") => "a b"');
 
+  // ===== 自驱循环新增内置（ci379 ~ ci395）=====
+  // ---- ci379 函数组合批：pipe / curry（compose / partial / identity 已存在）----
+  def('pipe', (...fns)=> (...args)=> {
+    if(fns.length === 0) return args.length === 1 ? args[0] : args;
+    let acc = applyFn(fns[0], args);
+    for(let i = 1; i < fns.length; i++) acc = applyFn(fns[i], [acc]);
+    return acc;
+  }, '左到右函数组合：(pipe f g h) 返回新函数，依次用 f、g、h 传递结果(等价于 (compose h g f))；零参时返回恒等函数。例 ((pipe (lambda(x)(+ x 1)) (lambda(x)(* x 2))) 3) => 8');
+  def('curry', (fn, arity)=> {
+    const n = (arity == null) ? (typeof fn === 'function' && fn.length ? fn.length : 1) : Math.max(1, Number(arity) | 0);
+    const acc = [];
+    const step = (...args)=> { acc.push(...args); if(acc.length >= n){ const a = acc.splice(0, n); return applyFn(fn, a); } return step; };
+    return step;
+  }, '柯里化：(curry f n) 返回累积参数的函数，凑满 n 个参数即调用 f；n 省略时取 f 的形参个数(对 Sibilant lambda 建议显式给 n)。例 ((curry (lambda(a b c)(+ a b c)) 3) 1 2 3) => 6、(((curry + 3) 1) 2 3) => 6');
+
+  // ---- ci383 数学扩展批：map-range（lerp / clamp / round-to / sign 已存在）----
+  def('map-range', (v, inLo, inHi, outLo, outHi)=> {
+    const a = Number(v), il = Number(inLo), ih = Number(inHi), ol = Number(outLo), oh = Number(outHi);
+    if(!isFinite(a) || !isFinite(il) || !isFinite(ih) || !isFinite(ol) || !isFinite(oh)) return null;
+    if(ih === il) return ol;
+    return ol + (a - il) / (ih - il) * (oh - ol);
+  }, '区间映射：(map-range v inLo inHi outLo outHi) 把 v 从 [inLo,inHi] 线性映射到 [outLo,outHi]；输入区间退化(=)时返回 outLo；任一参数非有限返回 null。例 (map-range 5 0 10 0 100) => 50');
+
+  // ---- ci387 列表扩展批：chunk / flatten-once（take / drop / interleave 已存在）----
+  def('chunk', (l, n)=> {
+    if(!Array.isArray(l)) return [];
+    const k = Math.trunc(Number(n));
+    if(!isFinite(k) || k <= 0) return [];
+    const out = [];
+    for(let i = 0; i < l.length; i += k) out.push(l.slice(i, i + k));
+    return out;
+  }, '定长分块：(chunk xs n) 把列表每 n 个切为一组(末组可不足 n)；n<=0 或非有限返回空列表。例 (chunk (list 1 2 3 4 5) 2) => ((1 2) (3 4) (5))');
+  def('flatten-once', (l)=> {
+    if(!Array.isArray(l)) return [];
+    const out = [];
+    for(const x of l){ if(Array.isArray(x)) for(const e of x) out.push(e); else out.push(x); }
+    return out;
+  }, '单层展平：(flatten-once xs) 仅把直接子列表展平一层，不递归。例 (flatten-once (list 1 (list 2 3) (list 4))) => (1 2 3 4)、(flatten-once (list 1 (list (list 2)))) => (1 (2))');
+
+  // ---- ci391 逻辑批：and? / or? / not? / xor? / implies?（严格布尔谓词）----
+  def('and?', (a, b)=> !(a === false || a === null) && !(b === false || b === null), '逻辑与谓词(严格布尔)：(and? a b) 仅当 a、b 均非 false/null 时为真。例 (and? #t #t) => #t、(and? #t #f) => #f');
+  def('or?', (a, b)=> !(a === false || a === null) || !(b === false || b === null), '逻辑或谓词(严格布尔)：(or? a b) 当 a、b 任一非 false/null 时为真。例 (or? #f #t) => #t、(or? #f #f) => #f');
+  def('not?', (x)=> (x === false || x === null), '逻辑非谓词(严格布尔)：(not? x) 当 x 为 false 或 null 时为真。例 (not? #f) => #t、(not? 5) => #f');
+  def('xor?', (a, b)=> (!(a === false || a === null)) !== (!(b === false || b === null)), '异或谓词(严格布尔)：(xor? a b) 恰有一个为真时为真。例 (xor? #t #f) => #t、(xor? #t #t) => #f');
+  def('implies?', (a, b)=> (a === false || a === null) || !(b === false || b === null), '蕴含谓词(严格布尔)：(implies? a b) 表示 a→b，仅当 a 真而 b 假时为假。例 (implies? #t #f) => #f、(implies? #f #t) => #t');
+
+  // ---- ci395 IO/JSON 批：json-parse / json-stringify / slurp（read-file / write-file 已存在）----
+  def('json-parse', (s)=> { try { return jsonDec(JSON.parse(String(s))); } catch(e){ return null; } }, 'JSON 解析(容错)：(json-parse s) 把 JSON 字符串解析为 Sibilant 值（数组→列表、对象→Dict）；解析失败返回 null。例 (dict-get (json-parse "{\\"a\\":1}") "a") => 1');
+  def('json-stringify', (v)=> { try { return JSON.stringify(jsonEnc(v)); } catch(e){ return null; } }, 'JSON 序列化(容错)：(json-stringify v) 把 Sibilant 值编码为 JSON 字符串；编码失败返回 null。例 (json-stringify (list 1 2)) => "[1,2]"');
+  def('slurp', (p)=> { const R = (typeof require === 'function') ? require : (typeof globalThis !== 'undefined' ? globalThis.require : undefined); if(typeof R !== 'function') return null; try { return R('fs').readFileSync(String(p), 'utf8'); } catch(e){ return null; } }, '读文件为字符串(容错)：(slurp p) 读取文本文件内容；文件不存在/不可读时返回 null（比 read-file 更宽容）。例 (> (string-length (slurp "interpreter.js")) 0) => #t');
+
   }
 
 function lispStr(v){
@@ -2211,7 +2269,7 @@ const STDLIB = `
 (define identity (lambda (x) x))
 (define constantly (lambda (x) (lambda (_) x)))
 (define compose (lambda (& fs) (lambda (x) (foldl (lambda (acc f) (f acc)) x (reverse fs)))))
-(define partition (lambda (n xs) (if (null? xs) (list) (cons (take xs n) (partition n (drop xs n))))))
+(define partition (lambda (n xs) (if (or (null? xs) (<= n 0)) (list) (cons (take xs n) (partition n (drop xs n))))))
 (define take-while (lambda (p xs) (if (or (null? xs) (not (p (car xs)))) (list) (cons (car xs) (take-while p (cdr xs))))))
 (define drop-while (lambda (p xs) (if (or (null? xs) (not (p (car xs)))) xs (drop-while p (cdr xs)))))
 (define butlast (lambda (xs) (if (null? (cdr xs)) (list) (cons (car xs) (butlast (cdr xs))))))
