@@ -1169,18 +1169,26 @@ function setupBuiltins(env){
 
   // ---- 数值与数学（扩容）----
   // gcd / lcm：整数最大公约 / 最小公倍（0 与任何数 gcd=该数绝对值，lcm=0）
-  def('gcd', (a,b)=>{
-    a = Math.trunc(a); b = Math.trunc(b);
-    a = Math.abs(a); b = Math.abs(b);
-    while(b){ const t = b; b = a % b; a = t; }
-    return a;
-  });
-  def('lcm', (a,b)=>{
-    a = Math.trunc(a); b = Math.trunc(b);
-    if(a === 0 || b === 0) return 0;
-    const g = (function gcd(x,y){ x=Math.abs(x); y=Math.abs(y); while(y){ const t=y; y=x%y; x=t; } return x; })(a,b);
-    return Math.abs(a*b) / g;
-  });
+  def('gcd', (a, b)=> {
+    if(!isFinite(Number(a)) || !isFinite(Number(b))) return null;
+    let x = Math.abs(Math.trunc(Number(a))), y = Math.abs(Math.trunc(Number(b)));
+    while(y){ const t = y; y = x % y; x = t; }
+    return x;
+  }, '最大公约数(非负整数)：(gcd a b) 返回 |a| 与 |b| 的最大公约数；非有限数输入返回 null。例 (gcd 12 18) => 6、(gcd -8 12) => 4、(gcd 0 7) => 7');
+  def('lcm', (a, b)=> {
+    if(!isFinite(Number(a)) || !isFinite(Number(b))) return null;
+    const x = Math.trunc(Number(a)), y = Math.trunc(Number(b));
+    if(x === 0 || y === 0) return 0;
+    const g = (function gcd(u,v){ u=Math.abs(u); v=Math.abs(v); while(v){ const t=v; v=u%v; u=t; } return u; })(x, y);
+    return Math.abs(x * y) / g;
+  }, '最小公倍数(非负整数)：(lcm a b) 返回 |a| 与 |b| 的最小公倍数；任一为 0 返回 0；非有限数输入返回 null。例 (lcm 4 6) => 12、(lcm 0 5) => 0');
+  def('divisors', (n)=> {
+    const v = Math.trunc(Number(n));
+    if(!isFinite(v) || v <= 0) return [];
+    const out = [];
+    for(let i = 1; i * i <= v; i++){ if(v % i === 0){ out.push(i); if(i !== v / i) out.push(v / i); } }
+    return out.sort((x, y) => x - y);
+  }, '正约数列表：(divisors n) 返回正整数 n 的所有正约数(升序)；非正整数返回空列表。例 (divisors 12) => (1 2 3 4 6 12)、(divisors 7) => (1 7)、(divisors -3) => ()');
   // signum：符号（-1 / 0 / 1）
   def('signum', (a)=> a > 0 ? 1 : (a < 0 ? -1 : 0));
   // 整数除法：floor-div 向负无穷、quotient 向零截断；除零抛错
@@ -1220,9 +1228,9 @@ function setupBuiltins(env){
   def('string-trim', (s)=> String(s).trim());
   def('string-reverse', (s)=> String(s).split('').reverse().join(''));
   def('string-contains?', (s, sub)=> String(s).includes(String(sub)));
-  def('string-split', (s, sep)=> String(s).split(sep === undefined ? /\s+/ : String(sep)));
+  def('string-split', (s, sep)=> String(s).split(sep === undefined ? /\s+/ : String(sep)), '按分隔符把字符串切成列表：(string-split s sep) sep 省略时按空白切分；sep 为字符串时按该串切分。例 (string-split "a,b,c" ",") => ("a" "b" "c")');
   def('string-join', (l, sep)=> Array.isArray(l) ? l.map(x => typeof x==='string'?x:lispStr(x)).join(String(sep||'')) : '');
-  def('string-replace', (s, old, neu)=> String(s).split(String(old)).join(String(neu)));
+  def('string-replace', (s, old, neu)=> { const o = String(old); if(o === '') return String(s); return String(s).split(o).join(String(neu)); }, '字符串替换：(string-replace s old neu) 将 s 中所有 old 子串替换为 neu；当 old 为空串时按无操作处理(返回原串，避免在每个字符间插入 neu 的意外行为)。例 (string-replace "a-b-c" "-" "/") => "a/b/c"');
   // ---------- 正则表达式内置（基于 JS RegExp）----------
   const mkRe = (pattern, flags)=> new RegExp(String(pattern), flags == null ? '' : String(flags));
   const mkReG = (pattern, flags)=>{ let f = (flags == null ? '' : String(flags)); if(!f.includes('g')) f += 'g'; return new RegExp(String(pattern), f); };
@@ -1347,7 +1355,7 @@ function setupBuiltins(env){
     const walk = (x)=>{ if(Array.isArray(x)) x.forEach(walk); else out.push(x); };
     if(Array.isArray(l)) l.forEach(walk);
     return out;
-  });
+  }, '展平(递归)：将嵌套列表递归展平为单层列表；非列表输入返回空列表(与 flatten-deep 一致)。例 (flatten (list 1 (list 2 3))) => (1 2 3)、(flatten 5) => ()');
   // ---- 列表查询 / 聚合工具 ----
   def('find', (f, l)=> {
     if(!Array.isArray(l)) return null;
@@ -1503,10 +1511,32 @@ function setupBuiltins(env){
   def('string-trimr', (s)=> String(s).replace(/\s+$/, ''), '去除右侧(结尾)空白。例 (string-trimr "ab  ") => "ab"');
   // ---- 集合/序列补充：超集判定、全互异判定、函数并置、带索引保留 ----
   def('superset?', (a, b)=> {
-    if(!(a instanceof LSet) || !(b instanceof LSet)) throw lispError('superset? 需要 set');
-    for(const v of b.keys()) if(!a.has(v)) return false;
-    return true;
-  }, '超集判定：(superset? a b) 当 b 的每一个元素都属于 a 时返回真(空集是任何集合的超集)。例 (superset? (set 1 2 3) (set 2)) => #t、(superset? (set 1) (set 1 2)) => #f');
+    const ta = (a instanceof LSet) ? 'set' : Array.isArray(a) ? 'list' : null;
+    const tb = (b instanceof LSet) ? 'set' : Array.isArray(b) ? 'list' : null;
+    if(ta === null || tb === null || ta !== tb) throw lispError('superset? 需要同为 set 或同为 list');
+    const A = (a instanceof LSet) ? a.keys() : a;
+    const B = (b instanceof LSet) ? b.keys() : b;
+    const aset = new Set(A.map(e => lispStr(e)));
+    return B.every(x => aset.has(lispStr(x)));
+  }, '超集判定(多态)：(superset? a b) 当 b 的每个元素都属于 a 时为真；支持 set 与 list 同类型比较，空集是任意集合超集。例 (superset? (list 1 2 3) (list 2)) => #t、(superset? (set 1 2 3) (set 2)) => #t');
+  const _collElems = (c)=> (c instanceof LSet) ? c.keys() : (Array.isArray(c) ? c : null);
+  def('disjoint?', (a, b)=> {
+    const A = _collElems(a), B = _collElems(b);
+    if(A === null || B === null) return false;
+    const bset = new Set(B.map(e => lispStr(e)));
+    return !A.some(x => bset.has(lispStr(x)));
+  }, '不相交判定(支持 set/list)：(disjoint? a b) 当 a 与 b 没有公共元素时为真。例 (disjoint? (list 1 2) (list 3 4)) => #t、(disjoint? (set 1 2) (set 2 3)) => #f');
+  def('symmetric-diff', (a, b)=> {
+    const A = _collElems(a), B = _collElems(b);
+    if(A === null || B === null) return [];
+    const aset = new Set(A.map(e => lispStr(e)));
+    const bset = new Set(B.map(e => lispStr(e)));
+    const out = [], seen = new Set();
+    const push = x => { const k = lispStr(x); if(!seen.has(k)){ seen.add(k); out.push(x); } };
+    for(const x of A) if(!bset.has(lispStr(x))) push(x);
+    for(const x of B) if(!aset.has(lispStr(x))) push(x);
+    return out;
+  }, '对称差(支持 set/list)：(symmetric-diff a b) 返回属于 a 或 b 但不属于交集的元素(去重, 先 a 后 b 顺序)。例 (symmetric-diff (list 1 2 3) (list 2 3 4)) => (1 4)、(symmetric-diff (set 1 2 3) (set 2 3 4)) => (1 4)');
   def('distinct?', (l)=> { if(!Array.isArray(l)) return true; const seen = new Set(); for(const e of l){ const k = lispStr(e); if(seen.has(k)) return false; seen.add(k); } return true; }, '判断是否全元素互异(无重复)。例 (distinct? (list 1 2 3)) => #t、(distinct? (list 1 1 2)) => #f');
   // ---- 高阶序列/谓词组合补充 ----
   def('distinct-by', (f, l)=> {
@@ -1601,10 +1631,14 @@ function setupBuiltins(env){
   def('pr-str', (...a)=> a.map(lispStr).join(' '), '把任意值渲染成 Sibilant 字面量字符串(与打印格式一致)。例 (pr-str (list 1 2)) => "(1 2)"');
   def('prn', (...a)=> { console.log(a.map(lispStr).join(' ')); return null; }, '打印各参数的字面量形式并换行，返回 null(副作用函数)。例 (prn "hi" 1) 输出 hi 1');
   def('subset?', (a, b)=> {
-    if(!(a instanceof LSet) || !(b instanceof LSet)) throw lispError('subset? 需要 set');
-    for(const v of a.keys()) if(!b.has(v)) return false;
-    return true;
-  }, '子集判定：(subset? a b) 当 a 的每个元素都属于 b 时返回真(空集是任何集合的子集)。例 (subset? (set 1) (set 1 2)) => #t');
+    const ta = (a instanceof LSet) ? 'set' : Array.isArray(a) ? 'list' : null;
+    const tb = (b instanceof LSet) ? 'set' : Array.isArray(b) ? 'list' : null;
+    if(ta === null || tb === null || ta !== tb) throw lispError('subset? 需要同为 set 或同为 list');
+    const A = (a instanceof LSet) ? a.keys() : a;
+    const B = (b instanceof LSet) ? b.keys() : b;
+    const bset = new Set(B.map(e => lispStr(e)));
+    return A.every(x => bset.has(lispStr(x)));
+  }, '子集判定(多态)：(subset? a b) 当 a 的每个元素都出现在 b 中时为真；支持 set 与 list 同类型比较，空集是任意集合子集；混合/非集合输入抛错。例 (subset? (list 1 2) (list 1 2 3)) => #t、(subset? (set 1) (set 1 2)) => #t');
   const _collToEntries = coll => {
     const m = new Map();
     if(coll instanceof LSet){ for(const e of coll.keys()) m.set(lispStr(e), e); }
@@ -2035,7 +2069,7 @@ function setupBuiltins(env){
 
   // ---- ci327: 数字/字符串 helper ----
   def('sign', (x)=> Math.sign(Number(x)), '符号函数：(sign x) 正数返回 1、负数返回 -1、零返回 0。例 (sign -5) => -1、(sign 3) => 1、(sign 0) => 0');
-  def('digits', (n)=> { const v = Math.abs(Math.trunc(Number(n))); return String(v).split('').map(c=> c.charCodeAt(0) - 48); }, '拆数字为各位列表(忽略符号)：(digits n) 返回 n 各十进制位组成的列表。例 (digits 123) => (1 2 3)、(digits -45) => (4 5)、(digits 0) => (0)');
+  def('digits', (n)=> { const v = Number(n); if(!isFinite(v)) return []; const num = Math.abs(Math.trunc(v)); return String(num).split('').map(c=> c.charCodeAt(0) - 48); }, '拆数字为各位列表(忽略符号)：(digits n) 返回 n 各十进制位组成的列表；非数字/非有限输入返回空列表(修复此前对 "abc" 返回 [30 49 30] 的隐患)。例 (digits 123) => (1 2 3)、(digits -45) => (4 5)、(digits 0) => (0)、(digits "abc") => ()');
   def('from-digits', (l)=> { if(!Array.isArray(l) || l.length === 0) return 0; return l.reduce((a, d)=> a * 10 + (Math.trunc(Number(d)) || 0), 0); }, '各位列表拼回数字：(from-digits l) 将十进制位列表还原为整数；空列表返回 0。例 (from-digits (list 1 2 3)) => 123');
   def('digit-sum', (n)=> { const v = Math.abs(Math.trunc(Number(n))); let s = 0; for(const c of String(v)) s += c.charCodeAt(0) - 48; return s; }, '各位数字之和(忽略符号)：(digit-sum n)。例 (digit-sum 123) => 6、(digit-sum -99) => 18');
   def('palindrome?', (x)=> { const s = Array.isArray(x) ? x.map(e=> JSON.stringify(e)) : String(x).split(''); for(let i = 0, j = s.length - 1; i < j; i++, j--){ if(s[i] !== s[j]) return false; } return true; }, '回文判定：(palindrome? x) 支持字符串或列表，正读反读一致返回 #t。例 (palindrome? "level") => #t、(palindrome? (list 1 2 1)) => #t、(palindrome? "abc") => #f');
@@ -2044,7 +2078,7 @@ function setupBuiltins(env){
   // ---- ci331: 列表进阶 helper ----
   def('rotations', (l)=> { if(!Array.isArray(l)) return []; const n = l.length; if(n === 0) return [[]]; const out = []; for(let i = 0; i < n; i++) out.push(l.slice(i).concat(l.slice(0, i))); return out; }, '所有旋转：(rotations l) 返回 l 的全部循环左旋列表。例 (rotations (list 1 2 3)) => ((1 2 3) (2 3 1) (3 1 2))');
   def('chunk-by', (f, l)=> { if(!Array.isArray(l) || l.length === 0) return []; const out = []; let cur = [l[0]]; let prevKey = JSON.stringify(applyFn(f, [l[0]])); for(let i = 1; i < l.length; i++){ const k = JSON.stringify(applyFn(f, [l[i]])); if(k === prevKey){ cur.push(l[i]); } else { out.push(cur); cur = [l[i]]; prevKey = k; } } out.push(cur); return out; }, '按键值分块：(chunk-by f l) 相邻元素 f 值相同的归为一块。例 (chunk-by (lambda (x) (< x 3)) (list 1 2 5 6 2)) => ((1 2) (5 6) (2))');
-  def('flatten-deep', (l)=> { const out = []; const walk = (x)=> { if(Array.isArray(x)){ for(const e of x) walk(e); } else out.push(x); }; walk(l); return out; }, '深度展平：(flatten-deep l) 递归展平任意嵌套列表。例 (flatten-deep (list 1 (list 2 (list 3 4)) 5)) => (1 2 3 4 5)');
+  def('flatten-deep', (l)=> { if(!Array.isArray(l)) return []; const out = []; const walk = (x)=> { if(Array.isArray(x)){ for(const e of x) walk(e); } else out.push(x); }; walk(l); return out; }, '深度展平：(flatten-deep l) 递归展平任意嵌套列表；非列表输入返回空列表(与 flatten 一致，修复此前返回单元素包裹的不一致)。例 (flatten-deep (list 1 (list 2 (list 3 4)) 5)) => (1 2 3 4 5)、(flatten-deep 5) => ()');
   def('tally', (l)=> { const d = new Dict(); if(Array.isArray(l)){ for(const e of l){ d.put(e, (d.get(e) || 0) + 1, true); } } return d; }, '计数：(tally l) 返回元素出现次数的映射。例 (dict-get (tally (list "a" "b" "a")) "a") => 2');
   def('unzip', (l)=> { if(!Array.isArray(l) || l.length === 0) return [[], []]; const a = [], b = []; for(const p of l){ if(Array.isArray(p)){ a.push(p[0]); b.push(p[1]); } } return [a, b]; }, '解压对列表：(unzip l) 把二元组列表拆成两个列表。例 (unzip (list (list 1 "a") (list 2 "b"))) => ((1 2) ("a" "b"))');
   def('scanl', (f, init, l)=> { const out = [init]; let acc = init; if(Array.isArray(l)){ for(const e of l){ acc = applyFn(f, [acc, e]); out.push(acc); } } return out; }, '带初值前缀扫描：(scanl f init l) 返回含初值的累积结果列表。例 (scanl + 0 (list 1 2 3)) => (0 1 3 6)');
@@ -2084,6 +2118,73 @@ function setupBuiltins(env){
   def('rank-list', (l)=> { if(!Array.isArray(l)) return []; const a = l.map(v=>Number(v)||0); const srt = [...a].map((v,i)=> [v,i]).sort((x,y)=> x[0]-y[0]); const rank = new Array(a.length); let i = 0; while(i < srt.length){ let j = i; while(j+1 < srt.length && srt[j+1][0] === srt[i][0]) j++; const r = (i + j) / 2 + 1; for(let k2=i;k2<=j;k2++) rank[srt[k2][1]] = r; i = j+1; } return rank; }, '秩次列表（升序, 并列取平均秩, 1 起）：(rank-list xs)。例 (rank-list (list 30 10 20)) => (3 1 2)、(rank-list (list 5 5 9)) => (1.5 1.5 3)');
   def('geomean', (l)=> { if(!Array.isArray(l) || l.length === 0) return 0; const a = l.map(v=>Number(v)||0); if(a.some(v=> v <= 0)) return 0; return Math.exp(a.reduce((s,v)=> s + Math.log(v), 0) / a.length); }, '几何平均（对数求和防溢出）：(geomean xs)；含非正数返回 0。例 (geomean (list 2 8)) => 4');
   def('harmonic-mean', (l)=> { if(!Array.isArray(l) || l.length === 0) return 0; const a = l.map(v=>Number(v)||0); if(a.some(v=> v <= 0)) return 0; return a.length / a.reduce((s,v)=> s + 1/v, 0); }, '调和平均：(harmonic-mean xs)；含非正数返回 0。例 (harmonic-mean (list 1 4 4)) => 2');
+  // ci359 日期时间批次：now / today / timestamp / format-date
+  const dateParts = (d)=> {
+    let date;
+    if(typeof d === 'number') date = new Date(d);
+    else if(typeof d === 'string') date = new Date(d);
+    else if(Array.isArray(d)){
+      const a = d.map(x => Number(x) || 0);
+      if(a.length < 2 || !isFinite(a[0]) || !isFinite(a[1])) return null;
+      date = new Date(a[0], a[1] - 1, a[2] || 1, a[3] || 0, a[4] || 0, a[5] || 0);
+    } else return null;
+    if(isNaN(date.getTime())) return null;
+    return { y: date.getFullYear(), m: date.getMonth() + 1, day: date.getDate(), h: date.getHours(), min: date.getMinutes(), s: date.getSeconds() };
+  };
+  const _pad2 = (n)=> String(n).padStart(2, '0');
+  const _pad4 = (n)=> String(n).padStart(4, '0');
+  def('now', ()=> Date.now(), '当前时间戳(毫秒)：(now) 返回自 1970-01-01 UTC 起的毫秒数(等价于 JS Date.now())。例 (> (now) 0) => #t');
+  def('today', ()=> { const p = dateParts(Date.now()); return _pad4(p.y) + '-' + _pad2(p.m) + '-' + _pad2(p.day); }, '今天日期(本地, YYYY-MM-DD)：(today) 返回当前本地日期字符串。例 (string-length (today)) => 10');
+  def('timestamp', (d)=> {
+    if(d === undefined || d === null) return null;
+    if(typeof d === 'number') return d;
+    if(typeof d === 'string'){ const ms = Date.parse(d); return isNaN(ms) ? null : ms; }
+    const p = dateParts(d);
+    return p === null ? null : new Date(p.y, p.m - 1, p.day, p.h, p.min, p.s).getTime();
+  }, '转为时间戳(毫秒)：(timestamp d) 接受 数字(ms 透传) / 字符串(Date.parse) / 列表 [年 月 日 时 分 秒](月为 1 基) 三种形式，返回自纪元起的毫秒数；非法输入返回 null。例 (timestamp (list 2020 1 1)) => 约等于 (new Date(2020,0,1)).getTime()');
+  def('format-date', (d, fmt)=> {
+    const p = dateParts(d);
+    if(p === null) return '';
+    const f = (fmt === undefined || fmt === null) ? 'YYYY-MM-DD' : String(fmt);
+    return f.replace('YYYY', _pad4(p.y)).replace('MM', _pad2(p.m)).replace('DD', _pad2(p.day)).replace('HH', _pad2(p.h)).replace('mm', _pad2(p.min)).replace('ss', _pad2(p.s));
+  }, '格式化日期：(format-date d fmt) 按模板输出，支持 YYYY/MM/DD/HH/mm/ss 占位符；省略 fmt 默认 "YYYY-MM-DD"。d 同 timestamp 的三种形式，非法返回空串。例 (format-date (list 2020 1 5) "YYYY/MM/DD") => "2020/01/05"');
+
+  // ci363 字符串批次：slugify / str-trim / str-pad / str-repeat / str-reverse
+  def('slugify', (s)=> {
+    const t = String(s).toLowerCase().normalize('NFKD').replace(/[̀-ͯ]/g, '');
+    return t.replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+  }, '转 slug：(slugify s) 转为小写、去重音、非字母数字替换为连字符并去首尾连字符。例 (slugify "Hello, World!") => "hello-world"、(slugify "  Foo  Bar  ") => "foo-bar"');
+  def('str-trim', (s)=> String(s).trim(), '去除字符串首尾空白：(str-trim s)。例 (str-trim "  x  ") => "x"');
+  def('str-pad', (s, n, ch, side)=> {
+    const len = Math.max(0, Math.trunc(Number(n)) || 0);
+    const pad = (ch === undefined || ch === null) ? ' ' : String(ch);
+    const str = String(s);
+    if(str.length >= len) return str;
+    const need = len - str.length;
+    const sd = (side === undefined || side === null) ? 'left' : String(side);
+    if(sd === 'right') return str + pad.repeat(need);
+    if(sd === 'both'){ const left = Math.ceil(need / 2); return pad.repeat(left) + str + pad.repeat(need - left); }
+    return pad.repeat(need) + str;
+  }, '左右补位：(str-pad s n ch side) 用 ch(默认空格) 在 side("left"默认/"right"/"both") 侧补至长度 n；已够长则原样返回。例 (str-pad "7" 3 "0") => "007"、(str-pad "7" 3 "0" "right") => "700"');
+  def('str-repeat', (s, n)=> { const k = Math.trunc(Number(n)); if(!isFinite(k) || k < 0) return ''; return String(s).repeat(k); }, '重复字符串 n 次：(str-repeat s n) n 为负或非数字时返回空串。例 (str-repeat "ab" 3) => "ababab"');
+  def('str-reverse', (s)=> String(s).split('').reverse().join(''), '反转字符串：(str-reverse s)。例 (str-reverse "hello") => "olleh"');
+
+  // ci375 编码批次：base64-encode / base64-decode / url-encode / url-decode
+  const _b64enc = (str)=> {
+    const s = String(str);
+    if(typeof Buffer !== 'undefined') return Buffer.from(s, 'utf8').toString('base64');
+    return btoa(unescape(encodeURIComponent(s)));
+  };
+  const _b64dec = (str)=> {
+    const s = String(str);
+    if(typeof Buffer !== 'undefined') return Buffer.from(s, 'base64').toString('utf8');
+    return decodeURIComponent(escape(atob(s)));
+  };
+  def('base64-encode', (s)=> _b64enc(s), 'Base64 编码：(base64-encode s) 将字符串按 UTF-8 编码为 Base64 串。例 (base64-encode "hello") => "aGVsbG8="');
+  def('base64-decode', (s)=> _b64dec(s), 'Base64 解码：(base64-decode s) 将 Base64 串解码为原字符串。例 (base64-decode "aGVsbG8=") => "hello"');
+  def('url-encode', (s)=> encodeURIComponent(String(s)), 'URL 编码：(url-encode s) 按 encodeURIComponent 编码(空格->%20 等)。例 (url-encode "a b&c") => "a%20b%26c"');
+  def('url-decode', (s)=> { try { return decodeURIComponent(String(s)); } catch(e){ return String(s); } }, 'URL 解码：(url-decode s) 按 decodeURIComponent 解码；非法序列安全回退为原串。例 (url-decode "a%20b") => "a b"');
+
   }
 
 function lispStr(v){
