@@ -2032,7 +2032,29 @@ function setupBuiltins(env){
   // ---- ci275: 缺失数值 helper ----
   def('square', (x)=> { const n = Number(x); return n * n; }, '平方：(square x) 返回 x 的平方。例 (square 5) => 25、(square -3) => 9');
   def('double', (x)=> Number(x) * 2, '加倍：(double x) 返回 x*2。例 (double 21) => 42、(double 0) => 0');
-}
+
+  // ---- ci327: 数字/字符串 helper ----
+  def('sign', (x)=> Math.sign(Number(x)), '符号函数：(sign x) 正数返回 1、负数返回 -1、零返回 0。例 (sign -5) => -1、(sign 3) => 1、(sign 0) => 0');
+  def('digits', (n)=> { const v = Math.abs(Math.trunc(Number(n))); return String(v).split('').map(c=> c.charCodeAt(0) - 48); }, '拆数字为各位列表(忽略符号)：(digits n) 返回 n 各十进制位组成的列表。例 (digits 123) => (1 2 3)、(digits -45) => (4 5)、(digits 0) => (0)');
+  def('from-digits', (l)=> { if(!Array.isArray(l) || l.length === 0) return 0; return l.reduce((a, d)=> a * 10 + (Math.trunc(Number(d)) || 0), 0); }, '各位列表拼回数字：(from-digits l) 将十进制位列表还原为整数；空列表返回 0。例 (from-digits (list 1 2 3)) => 123');
+  def('digit-sum', (n)=> { const v = Math.abs(Math.trunc(Number(n))); let s = 0; for(const c of String(v)) s += c.charCodeAt(0) - 48; return s; }, '各位数字之和(忽略符号)：(digit-sum n)。例 (digit-sum 123) => 6、(digit-sum -99) => 18');
+  def('palindrome?', (x)=> { const s = Array.isArray(x) ? x.map(e=> JSON.stringify(e)) : String(x).split(''); for(let i = 0, j = s.length - 1; i < j; i++, j--){ if(s[i] !== s[j]) return false; } return true; }, '回文判定：(palindrome? x) 支持字符串或列表，正读反读一致返回 #t。例 (palindrome? "level") => #t、(palindrome? (list 1 2 1)) => #t、(palindrome? "abc") => #f');
+  def('string-pad-left', (s, n, p)=> String(s).padStart(Math.max(0, Math.trunc(Number(n))), p === undefined ? ' ' : String(p)), '左侧补齐：(string-pad-left s n p) 用 p(默认空格)在左侧补至长度 n。例 (string-pad-left "7" 3 "0") => "007"');
+  def('string-pad-right', (s, n, p)=> String(s).padEnd(Math.max(0, Math.trunc(Number(n))), p === undefined ? ' ' : String(p)), '右侧补齐：(string-pad-right s n p) 用 p(默认空格)在右侧补至长度 n。例 (string-pad-right "ab" 4 "-") => "ab--"');
+  // ---- ci331: 列表进阶 helper ----
+  def('rotations', (l)=> { if(!Array.isArray(l)) return []; const n = l.length; if(n === 0) return [[]]; const out = []; for(let i = 0; i < n; i++) out.push(l.slice(i).concat(l.slice(0, i))); return out; }, '所有旋转：(rotations l) 返回 l 的全部循环左旋列表。例 (rotations (list 1 2 3)) => ((1 2 3) (2 3 1) (3 1 2))');
+  def('chunk-by', (f, l)=> { if(!Array.isArray(l) || l.length === 0) return []; const out = []; let cur = [l[0]]; let prevKey = JSON.stringify(applyFn(f, [l[0]])); for(let i = 1; i < l.length; i++){ const k = JSON.stringify(applyFn(f, [l[i]])); if(k === prevKey){ cur.push(l[i]); } else { out.push(cur); cur = [l[i]]; prevKey = k; } } out.push(cur); return out; }, '按键值分块：(chunk-by f l) 相邻元素 f 值相同的归为一块。例 (chunk-by (lambda (x) (< x 3)) (list 1 2 5 6 2)) => ((1 2) (5 6) (2))');
+  def('flatten-deep', (l)=> { const out = []; const walk = (x)=> { if(Array.isArray(x)){ for(const e of x) walk(e); } else out.push(x); }; walk(l); return out; }, '深度展平：(flatten-deep l) 递归展平任意嵌套列表。例 (flatten-deep (list 1 (list 2 (list 3 4)) 5)) => (1 2 3 4 5)');
+  def('tally', (l)=> { const d = new Dict(); if(Array.isArray(l)){ for(const e of l){ d.put(e, (d.get(e) || 0) + 1, true); } } return d; }, '计数：(tally l) 返回元素出现次数的映射。例 (dict-get (tally (list "a" "b" "a")) "a") => 2');
+  def('unzip', (l)=> { if(!Array.isArray(l) || l.length === 0) return [[], []]; const a = [], b = []; for(const p of l){ if(Array.isArray(p)){ a.push(p[0]); b.push(p[1]); } } return [a, b]; }, '解压对列表：(unzip l) 把二元组列表拆成两个列表。例 (unzip (list (list 1 "a") (list 2 "b"))) => ((1 2) ("a" "b"))');
+  def('scanl', (f, init, l)=> { const out = [init]; let acc = init; if(Array.isArray(l)){ for(const e of l){ acc = applyFn(f, [acc, e]); out.push(acc); } } return out; }, '带初值前缀扫描：(scanl f init l) 返回含初值的累积结果列表。例 (scanl + 0 (list 1 2 3)) => (0 1 3 6)');
+  // ---- ci335: 统计/取整 helper ----
+  def('stddev', (l)=> { if(!Array.isArray(l) || l.length < 2) return 0; const a = l.map(x=>Number(x)||0); const m = a.reduce((s,x)=> s+x,0)/a.length; return Math.sqrt(a.reduce((s,x)=> s+(x-m)*(x-m),0)/(a.length-1)); }, '样本标准差（无偏，方差开方）：(stddev xs)；元素不足 2 个返回 0。例 (stddev (list 2 4 4 4 5 5 7 9)) ≈ 2.138');
+  def('percentile', (l, p)=> { if(!Array.isArray(l) || l.length === 0) return 0; const a = l.map(x=>Number(x)||0).sort((x,y)=> x-y); const t = Math.min(100, Math.max(0, Number(p) || 0)) / 100; const idx = t * (a.length - 1); const lo = Math.floor(idx), hi = Math.ceil(idx); return lo === hi ? a[lo] : a[lo] + (a[hi] - a[lo]) * (idx - lo); }, '百分位数（线性插值法）：(percentile xs p) p 取 0..100。例 (percentile (list 1 2 3 4) 50) => 2.5、(percentile (list 1 2 3 4) 0) => 1');
+  def('argmax', (f, l)=> { if(!Array.isArray(l) || l.length === 0) return null; let best = l[0], bv = Number(applyFn(f, [l[0]])); for(let i = 1; i < l.length; i++){ const v = Number(applyFn(f, [l[i]])); if(v > bv){ bv = v; best = l[i]; } } return best; }, '取使 f 最大的元素（并列取最先）：(argmax f l)；空列表返回 null。例 (argmax (lambda (x) (* x x)) (list -3 2 1)) => -3');
+  def('argmin', (f, l)=> { if(!Array.isArray(l) || l.length === 0) return null; let best = l[0], bv = Number(applyFn(f, [l[0]])); for(let i = 1; i < l.length; i++){ const v = Number(applyFn(f, [l[i]])); if(v < bv){ bv = v; best = l[i]; } } return best; }, '取使 f 最小的元素（并列取最先）：(argmin f l)；空列表返回 null。例 (argmin (lambda (x) (abs x)) (list -3 2 1)) => 1');
+  def('round-to', (x, step)=> { const s = Math.abs(Number(step)) || 1; const r = Math.round(Number(x) / s) * s; const dec = (String(s).split('.')[1] || '').length; return dec ? Number(r.toFixed(dec)) : r; }, '取整到最近的 step 倍数：(round-to x step)；step 为 0 时按 1 处理。例 (round-to 7 5) => 5、(round-to 8 5) => 10、(round-to 3.14159 0.01) => 3.14');
+  }
 
 function lispStr(v){
   if(v === null) return '()';
