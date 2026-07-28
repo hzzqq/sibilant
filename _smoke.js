@@ -365,7 +365,7 @@ ok('help 未登记符号给出提示', run('(help (quote totally-unknown-sym-xyz
 ok('regex-test 命中', run('(regex-test "an" "banana")') === true);
 ok('regex-test 不命中', run('(regex-test "xyz" "banana")') === false);
 eq('regex-match 首匹配+捕获组', '(regex-match "(an)" "banana")', ['an', 'an']);
-ok('regex-match 不命中返回 null', run('(regex-match "zzz" "banana")') === null);
+ok('regex-match 不命中返回 #f（与 re-find 约定一致）', run('(regex-match "zzz" "banana")') === false);
 eq('regex-find-all 全匹配', '(regex-find-all "an" "banana")', ['an','an']);
 eq('regex-replace 全局替换', '(regex-replace "a" "banana" "X")', 'bXnXnX');
 eq('regex-split 用分隔符切分', '(regex-split "n" "banana")', ['ba','a','a']);

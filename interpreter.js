@@ -86,6 +86,7 @@ class LStream {
   constructor(head, tailPromise){ this.head = head; this.tail = tailPromise; }
 }
 function forcePromise(p){
+  if(typeof p === 'function') return p();       // R3 增强：支持 JS 闭包作为惰性尾部（向后兼容，原 LPromise 路径不变）
   if(!(p instanceof LPromise)) return p;        // force 非 promise 对象 → 原样返回
   if(p.forced) return p.val;                    // 记忆化：只求值一次
   const r = resolveTail(ev(p.expr, p.env, true));
@@ -414,11 +415,16 @@ function ev(node, env, tail){
       }
       case 'defstruct': {
         const name = node[1].name;
-        const fields = node.slice(2).map(f => f.name);
+        const fields = node.slice(2).map(f => {
+          if(!(f instanceof Sym)) throw lispError('defstruct 字段须为符号', node);
+          return f.name;
+        });
         const ctor = (...args)=>{
+          if(args.length !== fields.length)
+            throw lispError(`struct ${name} 需要 ${fields.length} 个参数，得到 ${args.length} 个`, node);
           const vals = {};
-          fields.forEach((f, i)=> vals[f] = args[i]);
-          return { __struct: name, vals };
+          for(let i = 0; i < fields.length; i++) vals[fields[i]] = args[i];
+          return { __struct: name, __fields: fields, vals };
         };
         envSet(env, name, ctor);
         for(const f of fields){
@@ -426,6 +432,66 @@ function ev(node, env, tail){
         }
         envSet(env, name + '?', (rec)=> !!(rec && rec.__struct === name));
         return new Sym(name);
+      }
+      case 'defenum': {
+        const name = node[1].name;
+        const variants = node.slice(2).map(v => {
+          if(v instanceof Sym) return { tag: v.name, fields: [] };
+          if(Array.isArray(v)){
+            if(!(v[0] instanceof Sym)) throw lispError('defenum 变体名须为符号', node);
+            const fields = v.slice(1).map(f => {
+              if(!(f instanceof Sym)) throw lispError('defenum 字段须为符号', node);
+              return f.name;
+            });
+            return { tag: v[0].name, fields };
+          }
+          throw lispError('defenum 变体须为符号或 (名 字段...)', node);
+        });
+        const seen = new Set();
+        for(const v of variants){
+          if(seen.has(v.tag)) throw lispError('defenum 变体名重复: ' + v.tag, node);
+          seen.add(v.tag);
+        }
+        for(const v of variants){
+          const ctor = (...args)=>{
+            if(args.length !== v.fields.length)
+              throw lispError(`enum ${name}.${v.tag} 需要 ${v.fields.length} 个参数，得到 ${args.length} 个`, node);
+            const vals = {};
+            for(let i = 0; i < v.fields.length; i++) vals[v.fields[i]] = args[i];
+            return { __enum: name, tag: v.tag, fields: v.fields, vals };
+          };
+          envSet(env, name + '-' + v.tag, ctor);
+          for(const f of v.fields)
+            envSet(env, name + '-' + f, (rec)=> (rec && rec.__enum === name) ? rec.vals[f] : null);
+        }
+        envSet(env, name + '?', (rec)=> !!(rec && rec.__enum === name));
+        envSet(env, name + '-tags', ()=> variants.map(v => new Sym(v.tag)));
+        return new Sym(name);
+      }
+      case 'enum-match': {
+        const val = ev(node[1], env, false);
+        for(let i = 2; i < node.length; i++){
+          const cl = node[i];
+          if(!Array.isArray(cl) || cl.length < 2) throw lispError('enum-match 子句须为 (模式 体...)', node);
+          const pat = cl[0];
+          if(pat instanceof Sym && pat.name === '_'){
+            const ne = makeEnv(env);
+            return evalBodyTCO(cl.slice(1), ne, tail);
+          }
+          let tag, params = [];
+          if(pat instanceof Sym){ tag = pat.name; }
+          else if(Array.isArray(pat)){
+            if(!(pat[0] instanceof Sym)) throw lispError('enum-match 模式须为符号或 (标签 字段...)', node);
+            tag = pat[0].name;
+            params = pat.slice(1).map(x => { if(!(x instanceof Sym)) throw lispError('enum-match 绑定须为符号', node); return x.name; });
+          } else throw lispError('enum-match 模式非法', node);
+          if(val && val.__enum && val.tag === tag){
+            const ne = makeEnv(env);
+            for(let k = 0; k < params.length; k++) envSet(ne, params[k], val.vals[params[k]]);
+            return evalBodyTCO(cl.slice(1), ne, tail);
+          }
+        }
+        return null;
       }
       case 'defn': {
         const nameSym = node[1];
@@ -559,7 +625,8 @@ function ev(node, env, tail){
         let x = ev(node[1], env, false);
         for(let i = 2; i < node.length; i++){
           const f = node[i];
-          const form = Array.isArray(f) ? [f[0], x, ...f.slice(1)] : [f, x];
+          // 用 QQ(x) 引用上一步结果，避免列表/表达式被二次求值（ci439 修复：此前直接内插 x 导致 (list ...) 被当表单调用）
+          const form = Array.isArray(f) ? [f[0], QQ(x), ...f.slice(1)] : [f, QQ(x)];
           x = ev(form, env, false);
         }
         return x;
@@ -568,7 +635,7 @@ function ev(node, env, tail){
         let x = ev(node[1], env, false);
         for(let i = 2; i < node.length; i++){
           const f = node[i];
-          const form = Array.isArray(f) ? [...f, x] : [f, x];
+          const form = Array.isArray(f) ? [...f, QQ(x)] : [f, QQ(x)];
           x = ev(form, env, false);
         }
         return x;
@@ -832,6 +899,15 @@ const DOCS = {};
 let GENSYM_COUNTER = 0;
 function setupBuiltins(env){
   const def = (n, f, doc) => { env.vars[n] = f; if(doc){ f.__doc = doc; DOCS[n] = doc; } return f; };
+  // ---- 可种子化伪随机数（ci399）：默认走 Math.random，seed-rand 后可复现 ----
+  let _rngState = null;
+  const _mulberry32 = (a)=> () => {
+    a |= 0; a = (a + 0x6D2B79F5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+  const _sibilantRand = () => (_rngState === null ? Math.random() : _rngState());
   DOCS['->']  = '线程宏：把前一步结果插入下一表单的第二个位置，串联多次调用。例 (-> 5 (+ 3) (* 2)) => 16';
   DOCS['->>'] = '线程宏：把前一步结果插入下一表单的最后一个位置。例 (->> 5 (+ 3) (* 2)) => 16';
   DOCS['defn'] = '函数语法糖：把 (defn 名 (参数…) 体…) 展开为 (define 名 (lambda (参数…) 体…))；第二参数若为字符串则作为文档串登记。例 (defn sq (x) (* x x)) 后 (sq 5) => 25';
@@ -846,6 +922,7 @@ function setupBuiltins(env){
       [new Sym('cons'), [new Sym('quote'), new Sym('begin')], new Sym('body')]]], env);
   DOCS['when']   = '条件宏：当 test 为真时顺序求值体(begin)并返回末值，否则返回 null。例 (when (> 3 2) (print "yes") 42) => 42';
   DOCS['unless'] = '条件宏：当 test 为假时顺序求值体(begin)并返回末值，否则返回 null（与 when 相反）。例 (unless false 7) => 7';
+
   // ---- ci279–ci323: 新增特殊形式/谓词的文档 + 既有函数缺失文档补全（自省可观测性）----
   DOCS['when-let'] = '绑定宏：(when-let (名 表达式) 体 …) 先求值表达式，非 nil 时把名绑定到该值并求值体，否则返回 null。例 (when-let (x (car (list 1))) (+ x 1)) => 2';
   DOCS['if-let']   = '绑定宏：(if-let (名 表达式) 真分支 [假分支]) 非 nil 走真分支，否则走假分支。例 (if-let (x (member 2 (list 1 2))) x 0) => (2)';
@@ -897,6 +974,55 @@ function setupBuiltins(env){
       '展开一次宏调用：若头部是已定义宏则展开一步，否则原样返回。用于检视单步宏展开。');
   def('macroexpand', (form)=> macroexpandAll(form),
       '完全展开所有(含嵌套)宏调用，返回纯代码；quote/quasiquote/unquote 内部不展开。');
+
+  // 结构化数据通用工具（配合 defstruct；跨 struct 通用，按实例自带 __struct 类型判定）
+  def('struct?', (rec)=> !!(rec && rec.__struct), '判断值是否为 struct 实例。');
+  def('struct-name', (rec)=> (rec && rec.__struct) ? rec.__struct : null, '返回 struct 类型名（非 struct 返回 null）。');
+  def('struct-fields', (rec)=> (rec && rec.__fields) ? rec.__fields.map(s => new Sym(s)) : [], '返回 struct 字段名列表。');
+  def('struct-get', (rec, field)=> {
+    if(!rec || !rec.__struct) throw lispError('struct-get 需要 struct 实例');
+    const f = (field instanceof Sym) ? field.name : String(field);
+    if(!(f in rec.vals)) throw lispError('struct 无字段 ' + f);
+    return rec.vals[f];
+  }, '读取 struct 字段值。');
+  def('struct-set', (rec, field, val)=> {
+    if(!rec || !rec.__struct) throw lispError('struct-set 需要 struct 实例');
+    const f = (field instanceof Sym) ? field.name : String(field);
+    if(!(f in rec.vals)) throw lispError('struct 无字段 ' + f);
+    const nv = {}; for(const k in rec.vals) nv[k] = rec.vals[k]; nv[f] = val;
+    return { __struct: rec.__struct, __fields: rec.__fields, vals: nv };
+  }, '不可变更新：返回字段被替换的新 struct（原实例不变）。');
+  def('struct->dict', (rec)=> {
+    if(!rec || !rec.__struct) throw lispError('struct->dict 需要 struct 实例');
+    const d = new Dict(); for(const k in rec.vals) d.put(new Sym(k), rec.vals[k], true); return d;
+  }, '将 struct 转为 dict（字段名 -> 值）。');
+  def('struct=?', (a, b)=> {
+    if(!a || !b || !a.__struct || !b.__struct) return false;
+    if(a.__struct !== b.__struct) return false;
+    if(a.__fields.length !== b.__fields.length) return false;
+    for(const k in a.vals) if(lispStr(a.vals[k]) !== lispStr(b.vals[k])) return false;
+    return true;
+  }, '结构相等：同类型且各字段值相等。');
+  // 枚举（defenum）通用工具：与 struct 平行，提供自省/相等/解构支撑
+  def('enum?', (e)=> !!(e && e.__enum), '判断值是否为 defenum 实例。');
+  def('enum-tag', (e)=> (e && e.__enum) ? e.tag : null, '返回 enum 变体标签名。');
+  def('enum-type', (e)=> (e && e.__enum) ? e.__enum : null, '返回 enum 所属类型名。');
+  def('enum-fields', (e)=> (e && e.__enum) ? e.fields.map(f => new Sym(f)) : [], '返回 enum 当前变体的字段名列表。');
+  def('enum-vals', (e)=> (e && e.__enum) ? e.fields.map(f => e.vals[f]) : [], '返回 enum 当前变体的字段值列表。');
+  def('enum=?', (a, b)=> {
+    if(!a || !b || !a.__enum || !b.__enum) return false;
+    if(a.__enum !== b.__enum || a.tag !== b.tag) return false;
+    for(const k in a.vals) if(lispStr(a.vals[k]) !== lispStr(b.vals[k])) return false;
+    return true;
+  }, 'enum 相等：同类型、同变体且各字段值相等。');
+  // 自省工具：读取 DOCS 注册表（内置、宏、defn 带文档均登记其中）
+  // 注：doc 已在本文件后段以相同签名定义并作 canonical（ci435 清理重复定义，此处不再重复）
+  def('apropos', (sub)=> {
+    const s = (typeof sub === 'string' ? sub : lispStr(sub)).toLowerCase();
+    const names = Object.keys(DOCS).filter(n => n.toLowerCase().includes(s)).sort();
+    if(typeof console !== 'undefined') console.log('[apropos "' + sub + '"] ' + (names.length ? names.join('  ') : '(无匹配)'));
+    return names;
+  }, '按子串搜索有文档的符号名：(apropos "map") 列出所有含 map 的内置/宏名并返回匹配名列表；区分大小写无关。例 (apropos "fold") => (foldl foldr)。');
   def('+', (...a)=> a.reduce((x,y)=>x+y, 0));
   def('-', (a,...r)=> r.length ? r.reduce((x,y)=>x-y, a) : -a);
   def('*', (...a)=> a.reduce((x,y)=>x*y, 1));
@@ -956,11 +1082,25 @@ function setupBuiltins(env){
     return r;
   }, '生成整数序列：(range n) 为 0..n-1；(range a b [step]) 从 a 起、步长 step（不可为 0）直到越过 b。例 (range 3) => (0 1 2)、(range 1 5 2) => (1 3)');
   def('length', (x)=> Array.isArray(x) ? x.length : (typeof x==='string' ? x.length : 0));
-  def('map', (f,l)=> Array.isArray(l) ? l.map(x=>applyFn(f,[x])) : []);
+  def('map', (f, ...ls)=> {
+    if(ls.length === 0) return [];
+    if(!ls.every(Array.isArray)) return [];
+    const n = Math.min.apply(null, ls.map(a => a.length));
+    const out = [];
+    for(let i = 0; i < n; i++) out.push(applyFn(f, ls.map(a => a[i])));
+    return out;
+  }, '映射：对列表每个元素应用函数。(map f xs) 单集合；(map f xs ys ...) 多集合并行，按最短者截断，把各集合第 i 个元素一并传入 f。例 (map + (list 1 2) (list 3 4)) => (4 6)');
   def('filter', (f,l)=> Array.isArray(l) ? l.filter(x=>applyFn(f,[x])) : []);
   // concat：连接多个序列（列表/单元素）为一个新列表；(concat (list 1 2) (list 3) 4) => (1 2 3 4)
   def('concat', (...ls)=> { const out = []; for(const x of ls){ if(Array.isArray(x)) out.push(...x); else if(x !== null && x !== undefined) out.push(x); } return out; }, '连接多个序列为一个新列表：列表展开并拼接，单元素直接追加。例 (concat (list 1 2) (list 3 4)) => (1 2 3 4)、(concat (list 1) 2) => (1 2)');
-  def('reduce', (f,init,l)=> Array.isArray(l) ? l.reduce((a,x)=>applyFn(f,[a,x]), init) : init);
+  def('reduce', (f,init,l)=> Array.isArray(l) ? l.reduce((a,x)=>applyFn(f,[a,x]), init) : init, '从左折叠：(reduce f init xs) 以 init 为初值，从左到右依次用 f 累积（f 接收 (累加值 元素)）；非列表返回 init。例 (reduce + 0 (list 1 2 3 4)) => 10');
+  def('reduce-kv', (f, init, d)=> {
+    if(!(d instanceof Dict)) return init;
+    const ks = d.keys(), vs = d.vals();
+    let acc = init;
+    for(let i=0;i<ks.length;i++) acc = applyFn(f, [acc, ks[i], vs[i]]);
+    return acc;
+  }, '由键值归约 dict：(reduce-kv f init dict) 以 init 为初值，对每对键值调用 f(累加值 键 值) 累积。例 (reduce-kv (lambda (a k v) (+ a v)) 0 (dict (quote x) 1 (quote y) 2)) => 3');
   // complement（谓词取反）：返回新谓词，调用 f 后对结果取逻辑非(Sibilant 中 false/null 视为假)。
   // 例 (filter (complement even?) (list 1 2 3)) => (1 3)
   def('complement', (f)=> (...args)=> { const r = applyFn(f, args); return (r === false || r === null); }, '返回谓词 f 的否定谓词：(complement f) 接受与 f 相同参数，调用 f 后对结果取逻辑非(Sibilant 中 false/null 视为假，其余为真)。常用于 (filter (complement pred) xs)。例 (filter (complement even?) (list 1 2 3)) => (1 3)');
@@ -971,10 +1111,13 @@ function setupBuiltins(env){
     for(const x of l){ acc = applyFn(f, [acc, x]); r.push(acc); }
     return r;
   }, '前缀累积(reductions)：(scan f init xs) 返回从 init 起每一步用 f 累积的结果列表(含初始值)，长度 = len(xs)+1；常用于生成前缀和/前缀积。例 (scan + 0 \'(1 2 3)) => (0 1 3 6)');
-  def('apply', (f,l)=> {
-    if(!Array.isArray(l)) throw lispError('apply 期望列表作为第二参数，得到: ' + lispStr(l));
-    return applyFn(f, l);
-  }, '把函数应用到参数列表：(apply f (list a b …)) 等价于 (f a b …)；第二参数必须是列表，否则报错。例 (apply + (list 1 2 3)) => 6');
+  def('apply', (f, ...args)=> {
+    if(args.length === 0) throw lispError('apply 需要至少一个参数(函数 + 参数列表)');
+    const l = args[args.length - 1];
+    if(!Array.isArray(l)) throw lispError('apply 末参必须是列表，得到: ' + lispStr(l));
+    const pre = args.slice(0, -1);   // 前置参数(可为空)，与标准 Lisp apply 一致：(apply f a b (list c d)) => (f a b c d)
+    return applyFn(f, pre.concat(l));
+  }, '把函数应用到参数列表(支持前置参数)：(apply f a b (list c d)) 等价于 (f a b c d)；末参必须是列表，否则报错。例 (apply + 1 2 (list 3 4)) => 10');
 
   // 函数组合：返回新函数 (comp f g h) => x => f(g(h(x)))，参数透传给最右侧函数
   def('comp', (...fns) => {
@@ -1009,6 +1152,21 @@ function setupBuiltins(env){
   def('memoized?', (f)=> !!(f && f.__memoCache));
   // memo-cache-size：返回记忆化函数当前缓存条目数（便于测试/调试）
   def('memo-cache-size', (f)=> (f && f.__memoCache) ? f.__memoCache.size : 0);
+  // memoize-by：带自定义键函数的记忆化；keyfn(x...) 的返回值作为缓存键（经 lispStr 归一化），相同键复用结果。
+  // 适用于「参数需先归一化再比较」的场景（如忽略列表顺序的缓存）。
+  def('memoize-by', (f, keyfn)=>{
+    if(!(f && (typeof f === 'function' || f.__lambda))) return f;
+    const cache = new Map();
+    const mf = (...args)=>{
+      const k = lispStr(keyfn ? applyFn(keyfn, args) : args);
+      if(cache.has(k)) return cache.get(k);
+      const r = applyFn(f, args);
+      cache.set(k, r);
+      return r;
+    };
+    mf.__memoCache = cache;
+    return mf;
+  }, '记忆化（自定义键）：按 keyfn(x...) 归一化结果作为键缓存 f 的返回值。例 (memoize-by (lambda (a b)(+ a b)) (lambda (a b)(list b a))) 让 (f 1 2) 与 (f 2 1) 共用缓存');
   def('zip', (...ls)=>{
     let n = Infinity;
     for(const l of ls){ if(!Array.isArray(l)){ n = 0; break; } n = Math.min(n, l.length); }
@@ -1016,7 +1174,7 @@ function setupBuiltins(env){
     const r = [];
     for(let i=0;i<n;i++) r.push(ls.map(l => Array.isArray(l) ? l[i] : null));
     return r;
-  });
+  }, '并行取元素：(zip a b …) 把多个列表按索引配对，返回“每位置元素列表”的列表（长度取最短者；非列表参数视为空）。例 (zip (list 1 2) (list 3 4)) => ((1 3) (2 4))');
   // 关联列表 (alist)：等号比较统一用 lispStr，使 sym/num/str 都能当键
   def('assoc', (k, al)=>{
     if(!Array.isArray(al)) return null;
@@ -1038,6 +1196,17 @@ function setupBuiltins(env){
   def('dict?', (x)=> x instanceof Dict);
   def('dict-get', (d, k, defv)=> (d instanceof Dict && d.has(k)) ? d.get(k) : (defv===undefined ? null : defv));
   def('dict-has?', (d, k)=> (d instanceof Dict) ? d.has(k) : false);
+  // 通用取值（多态）：统一 dict / 列表 / 字符串的下标或键查找，缺失返回 default(默认 null)。
+  // 补齐此前只能用 dict-get / nth 分开取值的缺口；键对 dict 走 lispStr 归一化，与 dict 全家一致。
+  def('get', (coll, key, defv)=> {
+    if(coll instanceof Dict) return coll.has(key) ? coll.get(key) : (defv === undefined ? null : defv);
+    if(Array.isArray(coll) || typeof coll === 'string'){
+      const i = (typeof key === 'number') ? key : Number(key);
+      if(Number.isFinite(i) && i >= 0 && i < coll.length) return coll[i];
+      return (defv === undefined ? null : defv);
+    }
+    return (defv === undefined ? null : defv);
+  }, '通用取值：(get coll key [default]) 对 dict 按 lispStr 键查找、对列表/字符串按 0 基下标查找，缺失返回 default(默认 null)。例 (get (dict (quote a) 1) (quote a)) => 1、(get (list 1 2 3) 1) => 2、(get "abc" 0) => "a"、(get (dict (quote a) 1) (quote z) 9) => 9');
   def('dict-set', (d, k, v)=> { if(!(d instanceof Dict)) throw lispError('dict-set 需要 dict'); return d.put(k, v, false); });
   def('dict-del', (d, k)=> { if(!(d instanceof Dict)) throw lispError('dict-del 需要 dict'); return d.del(k); });
   def('dict-keys', (d)=> (d instanceof Dict) ? d.keys() : []);
@@ -1099,8 +1268,9 @@ function setupBuiltins(env){
   def('update', (d, k, f)=> {
     if(!(d instanceof Dict)) throw lispError('update 需要 dict');
     const cur = d.has(k) ? d.get(k) : null;
-    return d.put(k, applyFn(f, [cur]), false);
-  }, '以函数 f 更新 dict 中键 k 的值：取当前值(无则 null)传给 f，结果写回，返回新 dict。例 (update (dict (quote x) 1) (quote x) (lambda (v) (+ v 10))) => #{x 11}');
+    const r = d._clone();
+    return r.put(k, applyFn(f, [cur]), false);
+  }, '以函数 f 更新 dict 中键 k 的值：取当前值(无则 null)传给 f，结果写回，返回新 dict(原 dict 不变)。例 (update (dict (quote x) 1) (quote x) (lambda (v) (+ v 10))) => #{x 11}');
   def('get-in', (coll, ks, defv)=> {
     if(!Array.isArray(ks)) return (defv===undefined) ? null : defv;
     let cur = coll;
@@ -1142,6 +1312,29 @@ function setupBuiltins(env){
   def('tree-find', (pred, t)=> treeFind(pred, t));
   def('tree-depth', (t)=> treeDepth(t));
   def('tree-size', (t)=> treeSize(t));
+
+  // ---- 通用树遍历/变换（作用于嵌套列表；dict/tree/原子不在内部展开）----
+  def('postwalk', (f, x)=> {
+    function pw(v){
+      if(Array.isArray(v)){ const inner = v.map(pw); return applyFn(f, [inner]); }
+      return applyFn(f, [v]);
+    }
+    return pw(x);
+  }, '自底向上变换嵌套列表：(postwalk f x) 先递归处理各子元素，再对结果整体应用 f；非列表原子原样交给 f。例 (postwalk (lambda (y) (if (list? y) y (if (number? y) (+ y 1) y))) (list 1 (list 2 3))) => (2 (3 4))');
+  def('prewalk', (f, x)=> {
+    function pr(v){
+      const top = applyFn(f, [v]);
+      return Array.isArray(top) ? top.map(pr) : top;
+    }
+    return pr(x);
+  }, '自顶向下变换：(prewalk f x) 先对 x 应用 f，若结果为列表再递归处理子元素；可用于先规整结构再下钻。例 (prewalk (lambda (y) (if (number? y) (+ y 1) y)) (list 1 (list 2 3))) => (2 (3 4))');
+  def('walk', (inner, outer, x)=> {
+    function w(v){
+      if(Array.isArray(v)){ const i = v.map(w); return applyFn(outer, [applyFn(inner, [i])]); }
+      return applyFn(outer, [applyFn(inner, [v])]);
+    }
+    return w(x);
+  }, '组合变换：(walk inner outer x) 每个节点先 inner 再 outer，列表子节点先整体 inner 再整体 outer(postwalk 的 inner/outer 拆分版)；注意 outer 也会作用于列表节点(+ 对列表逐元素)，例 (walk (lambda (y) y) (lambda (y) (if (number? y) (+ y 1) y)) (list 1 (list 2 3))) => (2 (3 4))');
 
   // ---- 数值与数学 ----
   def('min', (...a)=> Math.min(...a));
@@ -1231,14 +1424,80 @@ function setupBuiltins(env){
   def('string-split', (s, sep)=> String(s).split(sep === undefined ? /\s+/ : String(sep)), '按分隔符把字符串切成列表：(string-split s sep) sep 省略时按空白切分；sep 为字符串时按该串切分。例 (string-split "a,b,c" ",") => ("a" "b" "c")');
   def('string-join', (l, sep)=> Array.isArray(l) ? l.map(x => typeof x==='string'?x:lispStr(x)).join(String(sep||'')) : '');
   def('string-replace', (s, old, neu)=> { const o = String(old); if(o === '') return String(s); return String(s).split(o).join(String(neu)); }, '字符串替换：(string-replace s old neu) 将 s 中所有 old 子串替换为 neu；当 old 为空串时按无操作处理(返回原串，避免在每个字符间插入 neu 的意外行为)。例 (string-replace "a-b-c" "-" "/") => "a/b/c"');
+  // ---- ci435 新增字符串/序列工具（均为既有缺失）----
+  def('char-upcase', (c)=> { if(typeof c !== 'string' || c.length !== 1) return c; return c.toUpperCase(); }, '将单个字符大写：仅当参数为单字符字符串时转换，否则原样返回。例 (char-upcase "a") => "A"');
+  def('char-downcase', (c)=> { if(typeof c !== 'string' || c.length !== 1) return c; return c.toLowerCase(); }, '将单个字符小写。例 (char-downcase "Z") => "z"');
+  def('split-lines', (s)=> String(s).split(/\r?\n/), '按行切分字符串为列表（兼容 \\r\\n 与 \\n）。例 (split-lines "a\\nb") => ("a" "b")');
+  def('fmt', (tmpl, ...args)=> { let i = 0; return String(tmpl).replace(/%[sdfx%]/g, (m)=>{ if(m === '%%') return '%'; const a = args[i++]; if(m === '%s') return (a === null ? '' : String(a)); if(m === '%d') return String(Math.trunc(Number(a))); if(m === '%f') return String(Number(a)); if(m === '%x') return (a === null ? '' : Number(a).toString(16)); return m; }); }, '简易格式化：(fmt tmpl arg...) 用 %s/%d/%f/%x 顺序替换参数，%% 转义为 %。例 (fmt "hi %s=%d" "x" 3) => "hi x=3"');
+  def('drop-nth', (n, l)=> { if(!Array.isArray(l) || n < 1) return l.slice(); const out=[]; for(let i=0;i<l.length;i++) if((i+1) % n !== 0) out.push(l[i]); return out; }, '丢弃列表中每第 n 个元素（1 基索引）。例 (drop-nth 2 (list 1 2 3 4)) => (1 3)');
+
+  // ---- ci436 新增：transducer 转化管线（R1 全新能力；与 comp 组合，列表/集合通用）----
+  // 转化器工厂：接受归约函数 rf，返回新的归约函数 (acc, x) => acc。可用 comp 组合（先写先作用于输入）。
+  def('xmap', (f)=> (rf)=> (acc, x)=> rf(acc, applyFn(f, [x])), '转化器：映射。返回一个接受归约函数 rf 的转化器工厂；(transduce (xmap f) rf init coll) 等价于对每个元素先 f 再归约。例 (transduce (xmap (lambda (x)(* x 2))) + 0 (list 1 2 3)) => 12');
+  def('xfilter', (pred)=> (rf)=> (acc, x)=> applyFn(pred, [x]) ? rf(acc, x) : acc, '转化器：过滤。仅当 pred(x) 为真时把 x 交给下游归约。例 (transduce (xfilter even?) + 0 (list 1 2 3 4)) => 6');
+  def('xtake', (n)=> (rf)=> { let i = 0; return (acc, x)=> (i++ < n ? rf(acc, x) : acc); }, '转化器：取前 n 个。例 (transduce (xtake 2) + 0 (list 1 2 3)) => 3');
+  def('xdrop', (n)=> (rf)=> { let i = 0; return (acc, x)=> (i++ < n ? acc : rf(acc, x)); }, '转化器：丢弃前 n 个。例 (transduce (xdrop 1) + 0 (list 1 2 3)) => 5');
+  def('transduce', (xform, rf, init, coll)=> {
+    const xf = applyFn(xform, [rf]);
+    let acc = init;
+    if(Array.isArray(coll)){ for(let i=0;i<coll.length;i++) acc = xf(acc, coll[i]); }
+    else { for(const x of coll) acc = xf(acc, x); }
+    return acc;
+  }, 'transducer 执行：(transduce xform rf init coll) 把 xform 应用到归约函数 rf 上得到 xf，再沿 coll 折叠。xform 可由 comp 组合（先写先作用于输入）。例 (transduce (comp (xmap (lambda (x)(+ x 1))) (xfilter even?)) + 0 (list 1 2 3 4)) => 6');
+
+  // ---- ci437 新增：Dict/集合 索引与查取增强（R1 全新能力；此前缺 index-by/deep-merge/get-or/find）----
+  // 深度合并两个 Dict：值为 Dict 时递归合并，否则以第二个覆盖第一个。
+  function deepMergeRec(a, b){
+    let out = a._clone();
+    for(const k of b.keys()){
+      const v2 = b.get(k);
+      if(out.has(k) && out.get(k) instanceof Dict && v2 instanceof Dict) out = out.put(k, deepMergeRec(out.get(k), v2), true);
+      else out = out.put(k, v2, true);
+    }
+    return out;
+  }
+  def('deep-merge', (d1, d2)=> {
+    if(!(d1 instanceof Dict)) d1 = new Dict();
+    if(!(d2 instanceof Dict)) d2 = new Dict();
+    return deepMergeRec(d1, d2);
+  }, '深度合并两个 Dict：相同键且值均为 Dict 时递归合并，否则以第二个覆盖第一个。例 (deep-merge (dict "a" (dict "x" 1) "b" 2) (dict "a" (dict "y" 3) "c" 4)) 的 "a" 为 {"x":1,"y":3}，并含 "b","c"');
+  // 以函数结果为主键建索引 Dict（后者覆盖前者）
+  def('index-by', (f, coll)=> {
+    let d = new Dict();
+    const items = (coll instanceof Dict) ? coll.vals() : (Array.isArray(coll) ? coll : [...coll]);
+    for(const x of items) d = d.put(applyFn(f, [x]), x);
+    return d;
+  }, '以 f(x) 为主键把集合元素建索引为 Dict(键 -> 元素，后者覆盖前者)。例 (index-by (lambda (x)(mod x 3)) (list 1 2 3 4)) 的键 1/2/0 分别指向 4/2/3');
+  // 安全取值：Dict/数组/对象在键缺失时返回默认值，不抛错、不返回 undefined
+  def('get-or', (d, k, defv)=> {
+    if(d instanceof Dict) return d.has(k) ? d.get(k) : defv;
+    if(Array.isArray(d)) return (k >= 0 && k < d.length) ? d[k] : defv;
+    if(d && typeof d === 'object') return (k in d) ? d[k] : defv;
+    return defv;
+  }, '安全取值：Dict/数组/对象在键缺失时返回默认值 defv（而非 undefined/nil）。例 (get-or (dict "a" 1) "b" 99) => 99');
+  // 首个满足谓词的元素，无则 null（不抛错）；统一支持列表与 Dict(遍历值)
+  def('find-first', (pred, coll)=> {
+    const items = (coll instanceof Dict) ? coll.vals() : (Array.isArray(coll) ? coll : [...coll]);
+    for(const x of items) if(applyFn(pred, [x])) return x;
+    return null;
+  }, '返回集合(列表或 Dict)中首个满足谓词的元素，无则 null。例 (find-first (lambda (x)(> x 2)) (list 1 2 3 4)) => 3，(find-first (lambda (x)(> x 2)) (dict "p" 1 "q" 5)) => 5');
+
   // ---------- 正则表达式内置（基于 JS RegExp）----------
-  const mkRe = (pattern, flags)=> new RegExp(String(pattern), flags == null ? '' : String(flags));
-  const mkReG = (pattern, flags)=>{ let f = (flags == null ? '' : String(flags)); if(!f.includes('g')) f += 'g'; return new RegExp(String(pattern), f); };
-  def('regex-match', (pattern, str, flags)=> { const m = String(str).match(mkRe(pattern, flags)); return m || null; });
-  def('regex-test',  (pattern, str, flags)=> mkRe(pattern, flags).test(String(str)));
-  def('regex-find-all', (pattern, str, flags)=> String(str).match(mkReG(pattern, flags)) || []);
-  def('regex-replace', (pattern, str, repl, flags)=> String(str).replace(mkReG(pattern, flags), String(repl)));
-  def('regex-split', (pattern, str, flags)=> String(str).split(mkRe(pattern, flags)));
+  // 说明：re-*（见下文）为规范正则 API。下方 regex-* 旧别名统一复用其内部 _asRegex / _matchToList，
+  // 保证两套 API 行为一致（单一真相源），并修复 regex-replace 曾把函数替换器直接 String() 导致回调失效的 bug。
+  def('regex-test',  (pattern, str, flags)=> _asRegex(pattern, flags).test(String(str)));
+  def('regex-match', (pattern, str, flags)=> { if(typeof str !== 'string') return false; const rx=_asRegex(pattern,flags); rx.lastIndex=0; return _matchToList(rx.exec(str)); });
+  def('regex-find-all', (pattern, str, flags)=> { if(typeof str !== 'string') return []; const f=(flags?String(flags):''); const rx=_asRegex(pattern, f.includes('g')?f:f+'g'); rx.lastIndex=0; const out=[]; let m; while((m=rx.exec(String(str)))!==null){ out.push(m[0]); if(m[0].length===0) rx.lastIndex++; } return out; });
+  def('regex-split', (pattern, str, flags)=> String(str).split(_asRegex(pattern, flags)));
+  def('regex-replace', (pattern, str, repl, flags)=> {
+    if(typeof str !== 'string') return '';
+    const f = (flags ? String(flags) : '');
+    const rx = _asRegex(pattern, f.includes('g') ? f : f + 'g');
+    if(typeof repl === 'function' || (repl && repl.__lambda)){
+      return String(str).replace(rx, (...a)=> { try { const r2 = applyFn(repl, a.slice(0, Math.max(1, a.length - 2))); return (typeof r2 === 'string') ? r2 : lispStr(r2); } catch(e){ return a[0]; } });
+    }
+    return String(str).replace(rx, (typeof repl === 'string') ? repl : String(repl == null ? '' : repl));
+  });
   // ---------- JSON 序列化（与宿主环境互操作）----------
   function jsonEnc(v){
     if(v === null || v === undefined) return null;
@@ -1290,7 +1549,7 @@ function setupBuiltins(env){
   def('list-ref', (l, i)=> Array.isArray(l) ? (i >= 0 && i < l.length ? l[i] : null) : null, '按索引取列表元素(0 基)；下标越界或为负返回 null（不再回绕到末尾）。例 (list-ref (list 1 2 3) 1) => 2、(list-ref (list 1) 5) => ()');
   def('reverse', (l)=> Array.isArray(l) ? l.slice().reverse() : []);
   def('take', (l, n)=> Array.isArray(l) ? l.slice(0, Math.max(0, n|0)) : [], '取列表前 n 个元素(新列表)；n 为负时按 0 处理。例 (take (list 1 2 3 4) 2) => (1 2)');
-  def('nth', (l, i)=> Array.isArray(l) ? (i >= 0 && i < l.length ? l[i] : null) : null, '按索引取列表元素(0 基)；下标越界或为负返回 null（不应回绕到末尾）。例 (nth (list 1 2 3) 0) => 1、(nth (list 1 2 3) 9) => ()');
+  def('nth', (l, i)=> Array.isArray(l) ? (i >= 0 && i < l.length ? l[i] : null) : null, '按索引取列表元素(0 基)；下标越界或为负返回 null（不应回绕到末尾）。例 (nth (list 1 2 3) 0) => 1、(nth (list 1 2 3) 9) => null');
   // 序列工具补全：排序 / 切片 / 取尾 / 取末 / 扁平化 / 谓词聚合
   def('sort', (l, cmp)=> {
     if(!Array.isArray(l)) return [];
@@ -1373,30 +1632,82 @@ function setupBuiltins(env){
     for(const x of l){ if(!seen.some(s => deepEqual(s, x))){ seen.push(x); out.push(x); } }
     return out;
   }, '去重：保留首次出现顺序，用 deepEqual 判定相等。例 (distinct (list 1 1 2 3 2)) => (1 2 3)');
+  // ---- 序列生成 / 计数补充（ci417）----
+  // 注：repeat 已在本文件后段(ci)以相同签名 (x n) 定义并带文档，此处不再重复定义（消除重复定义遮蔽隐患，ci435 清理）
+  def('count-by', (f, l)=> {
+    const m = new Map();
+    if(Array.isArray(l)) for(const x of l){ const k = JSON.stringify(applyFn(f, [x])); m.set(k, (m.get(k) || 0) + 1); }
+    let d = new Dict();
+    for(const [k, v] of m) d = d.put(JSON.parse(k), v, false);
+    return d;
+  }, '按 f(x) 的键统计出现次数，返回 dict(键=分组键, 值=次数, 保持首现序)。例 (count-by even? (list 1 2 3 4)) => #{#f 2 #t 2}');
+  // 注：此前本函数返回「键值对数组」，与文档/预置库(STDLIB)的 dict 实现矛盾且被其覆盖(死代码)。
+  // ci441 修复：统一为返回 Dict（单一真相源），与文档及 _query_test 一致；预置库同名 define 已删除。
   def('frequencies', (l)=> {
-    const m = {}, out = [];
-    if(Array.isArray(l)) for(const x of l){ const k = JSON.stringify(x); m[k] = (m[k] || 0) + 1; }
-    for(const k in m){ out.push([JSON.parse(k), m[k]]); }
-    return out;
+    const m = new Map();   // 以 lispStr(x) 作分组键，但保留原始值 x 作为 Dict 键（避免 JSON 往返破坏 Sym/复杂键）
+    if(Array.isArray(l)) for(const x of l){ const k = lispStr(x); const e = m.get(k); if(e){ e.n++; } else { m.set(k, { val: x, n: 1 }); } }
+    let d = new Dict();
+    for(const {val, n} of m.values()) d = d.put(val, n, false);
+    return d;
   }, '统计各元素出现次数，返回计数 dict #{元素 次数 ...}（插入序，可用 dict-keys/dict-get 读取）。例 (frequencies (list 1 1 2)) => #{1 2 2 1}');
   def('any?', (f, l)=> {
     if(!Array.isArray(l)) return false;
     for(const x of l){ const v = applyFn(f,[x]); if(v !== false && v !== null) return true; }
     return false;
-  });
-  def('every?', (f, l)=> {
-    if(!Array.isArray(l)) return true;
-    for(const x of l){ const v = applyFn(f,[x]); if(v === false || v === null) return false; }
-    return true;
-  });
+  }, '存在判定：列表中任一元素使谓词 f 为真(非 false/null)时返回 #t；空列表为 #f。例 (any? odd? (list 2 4 5)) => #t、(any? odd? (list 2 4)) => #f');
+  // 注：every? 已在上方定义并含文档，此处不再重复定义（消除重复定义遮蔽隐患，ci433 清理）
+  // ---- ci433 新增（仅保留既有定义缺失者；constantly/juxt/string-contains?/string-join/substring 已于前文存在，重复定义会遮蔽既有实现，故删除副本）----
+  def('starts-with?', (s, pre)=> { if(typeof s !== 'string' || typeof pre !== 'string') return false; return s.startsWith(pre); }, '判断字符串 s 是否以 pre 开头。例 (starts-with? "hello" "he") => #t');
+  def('ends-with?', (s, suf)=> { if(typeof s !== 'string' || typeof suf !== 'string') return false; return s.endsWith(suf); }, '判断字符串 s 是否以 suf 结尾。例 (ends-with? "hello" "lo") => #t');
+
+  // ---- ci441 新增：正则表达式支持（此前缺失标准库的文本模式匹配能力）----
+  // 统一构造 RegExp：接受字符串模式(忽略大小写等可选 flags)或 RegExp 对象；非字符串模式安全降级为空匹配
+  const _asRegex = (re, flags)=> {
+    if(re instanceof RegExp) return flags ? new RegExp(re.source, flags) : re;
+    const src = (typeof re === 'string') ? re : (re == null ? '' : String(re));
+    return new RegExp(src, flags || '');
+  };
+  // 把正则匹配结果(含捕获组)整理为 Sibilant 列表，undefined 组记为 #f
+  const _matchToList = (m)=> m ? m.map(x => x === undefined ? false : x) : false;
+  def('re-find', (re, s)=> {
+    if(typeof s !== 'string') return false;
+    const rx = _asRegex(re); rx.lastIndex = 0;
+    return _matchToList(rx.exec(s));
+  }, '正则：返回首个匹配 [整匹配, 捕获组...] 的列表，未匹配返回 #f。例 (re-find "[0-9]+" "ab12c") => ("12")');
+  def('re-matches', (re, s)=> {
+    if(typeof s !== 'string') return false;
+    const rx = _asRegex(re); rx.lastIndex = 0;
+    const m = rx.exec(s);
+    if(!m || m.index !== 0 || m[0].length !== s.length) return false;   // 要求整串精确匹配
+    return _matchToList(m);
+  }, '正则：仅当整个字符串精确匹配时返回 [整匹配, 捕获组...]，否则 #f。例 (re-matches "^[0-9]+$" "123") => ("123")');
+  def('re-seq', (re, s)=> {
+    if(typeof s !== 'string') return [];
+    const rx = _asRegex(re, 'g'); const out = []; let m;
+    while((m = rx.exec(s)) !== null){ out.push(m[0]); if(m[0].length === 0) rx.lastIndex++; }   // 防零宽死循环
+    return out;
+  }, '正则：返回所有不重叠匹配的列表。例 (re-seq "[0-9]+" "a1b22c333") => ("1" "22" "333")');
+  def('re-replace', (re, s, repl)=> {
+    if(typeof s !== 'string') return '';
+    const rx = _asRegex(re, 'g');
+    // 支持字符串替换，或 Sibilant 函数/lambda 作为替换器(注意 lambda 非 typeof 'function'，需用 __lambda 识别)
+    if(typeof repl === 'function' || (repl && repl.__lambda)){
+      return s.replace(rx, (...a)=> {
+        try { const r2 = applyFn(repl, a.slice(0, Math.max(1, a.length - 2))); return (typeof r2 === 'string') ? r2 : lispStr(r2); }
+        catch(e){ return a[0]; }   // 替换函数抛错时回退为原匹配，避免整次替换崩溃
+      });
+    }
+    const r = (typeof repl === 'string') ? repl : String(repl == null ? '' : repl);
+    return s.replace(rx, r);
+  }, '正则：把所有匹配替换为 repl(字符串或函数)。例 (re-replace "[0-9]" "a1b2" "#") => "a#b#"');
 
   // ---- 序列分组/切分工具 ----
   // 按 f(x) 的分组键把列表分组，返回 dict(键=分组键, 值=同组元素列表, 保持原序)
   def('group-by', (f, l)=> {
     const m = new Map();   // 保持插入序(整数键也要保序，故不用普通对象)
-    if(Array.isArray(l)) for(const x of l){ const k = applyFn(f, [x]); const kk = JSON.stringify(k); const arr = m.get(kk); if(arr) arr.push(x); else m.set(kk, [x]); }
+    if(Array.isArray(l)) for(const x of l){ const k = applyFn(f, [x]); const kk = lispStr(k); const e = m.get(kk); if(e){ e.arr.push(x); } else { m.set(kk, { key: k, arr: [x] }); } }
     let d = new Dict();
-    for(const [kk, arr] of m) d = d.put(JSON.parse(kk), arr, false);   // Dict 不可变：put 返回新 dict，需重新赋值
+    for(const {key, arr} of m.values()) d = d.put(key, arr, false);   // 保留原始分组键(可为 Sym/复杂值)，避免 JSON 往返损坏
     return d;
   }, '按 f(x) 的分组键把列表分组，返回 dict(键=分组键, 值=同组元素列表, 保持原序)。例 (group-by even? (list 1 2 3 4)) => #{#f (1 3) #t (2 4)}');
   // 把列表按「相邻且 f 值相等」切成若干段(返回段的列表)
@@ -1447,6 +1758,8 @@ function setupBuiltins(env){
     for(const x of l){ const r = applyFn(f, [x]); if(Array.isArray(r)) for(const y of r) out.push(y); }
     return out;
   }, '对每个元素应用 f，把返回的列表依次拼接(flatMap)。例 (mapcat (lambda (x) (list x x)) (list 1 2)) => (1 1 2 2)');
+  // ---- ci434 新增（partition-all 为既有缺失者；map-indexed/distinct-by 已于前文存在，不再重复定义）----
+  def('partition-all', (n, l)=> { if(!Array.isArray(l) || n<1) return []; const out=[]; for(let i=0;i<l.length;i+=n) out.push(l.slice(i, i+n)); return out; }, '按 n 等分切分（末段不足也保留）。例 (partition-all 2 (list 1 2 3 4 5)) => ((1 2) (3 4) (5))');
   def('split-at', (n, l)=> {
     if(!Array.isArray(l)) return [[], []];
     const i = Math.max(0, n | 0);
@@ -1460,12 +1773,18 @@ function setupBuiltins(env){
     return coll.slice(s, Math.max(s, end | 0));
   }, '取子向量：(subvec coll start [end]) 返回索引 [start,end) 的新列表(不含 end)。例 (subvec (list 1 2 3 4 5) 1 3) => (2 3)');
   def('replace', (coll, idx, val)=> {
+    // R2 隐性修复：此前字符串入参会静默返回 []（与实际语义不符）；现支持字符串按索引替换字符。
+    if(typeof coll === 'string'){
+      const i = idx | 0;
+      if(i >= 0 && i < coll.length) return coll.slice(0, i) + (val === null || val === undefined ? '' : String(val)) + coll.slice(i + 1);
+      return coll;
+    }
     if(!Array.isArray(coll)) return [];
     const i = idx | 0;
     const out = coll.slice();
     if(i >= 0 && i < out.length) out[i] = val;
     return out;
-  }, '函数式替换：(replace coll idx val) 返回新列表，仅把索引 idx 处元素改为 val(原列表不变)；索引越界则原样返回副本。例 (replace (list 1 2 3) 1 9) => (1 9 3)');
+  }, '函数式替换：(replace coll idx val) 对列表返回新列表（仅索引 idx 处改为 val，原列表不变）；对字符串返回新字符串（索引 idx 处字符替换为 val）；索引越界原样返回。例 (replace (list 1 2 3) 1 9) => (1 9 3)、(replace "abc" 1 "X") => "aXc"');
   def('zipmap', (keys, vals)=> {
     const d = new Dict();
     if(!Array.isArray(keys) || !Array.isArray(vals)) return d;
@@ -1482,10 +1801,10 @@ function setupBuiltins(env){
   }, '成员判定：(contains? coll x) 对数组按值(等号语义)、dict/set 按键、字符串按子串返回真。例 (contains? (list 1 2 3) 2) => #t');
   def('conj', (coll, x)=> {
     if(Array.isArray(coll)) return [...coll, x];
-    if(coll instanceof Dict){ if(Array.isArray(x) && x.length >= 2) return coll.put(x[0], x[1], false); return coll; }
-    if(coll instanceof LSet) return coll.add(x, false);
+    if(coll instanceof Dict){ if(Array.isArray(x) && x.length >= 2) return coll._clone().put(x[0], x[1], false); return coll._clone(); }
+    if(coll instanceof LSet) return coll._clone().add(x, false);
     return [x];
-  }, '追加元素：(conj coll x) 对数组返回末尾追加 x 的新列表；对 dict 以 [k v] 形式写入；对 set 加入 x。例 (conj (list 1 2) 3) => (1 2 3)');
+  }, '追加元素(纯函数，不修改入参)：(conj coll x) 对数组返回末尾追加 x 的新列表；对 dict 以 [k v] 形式写入返回新 dict；对 set 加入 x 返回新 set。例 (conj (list 1 2) 3) => (1 2 3)');
   def('select-keys', (m, ks)=> {
     const d = new Dict();
     if(!(m instanceof Dict) || !Array.isArray(ks)) return d;
@@ -1600,8 +1919,14 @@ function setupBuiltins(env){
   def('dec', (x)=> x - 1, '返回 x-1。例 (dec 4) => 3');
   // ---- 随机 / 解析 / 输出 / 集合关系补充 ----
   def('every', (f, l)=> { if(!Array.isArray(l)) return false; for(const e of l) if(!applyFn(f, [e])) return false; return true; }, '全称量词：(every pred coll) 当 coll 中每个元素都满足 pred 时返回真(空集为真)。例 (every pos? (list 1 2 3)) => #t');
-  def('rand', ()=> Math.random(), '返回 [0,1) 区间的伪随机浮点数。例 (rand) 形如 0.37…');
-  def('rand-int', (n)=> Math.floor(Math.random() * Math.max(0, n|0)), '返回 [0,n) 区间的伪随机整数。例 (rand-int 10) 落在 0..9');
+  def('rand', ()=> _sibilantRand(), '返回 [0,1) 区间的伪随机浮点数；seed-rand 后可复现。例 (rand) 形如 0.37…');
+  def('rand-int', (lo, hi)=> {
+    if(hi === undefined){ const n = Math.max(0, lo|0); return Math.floor(_sibilantRand() * n); }
+    const a = Math.floor(Number(lo)), b = Math.ceil(Number(hi));
+    if(!isFinite(a) || !isFinite(b)) return null;
+    if(b < a) return null;
+    return a + Math.floor(_sibilantRand() * (b - a + 1));
+  }, '返回 [a,b] 区间（含两端）的伪随机整数；(rand-int n) 等价于 [0,n)，(rand-int a b) 落在 a..b；区间非有限返回 null。例 (rand-int 1 6) 落在 1..6、(rand-int 10) 落在 0..9、(seed-rand 42) 后序列固定');
   // ---- 随机辅助 ----
   def('rand-nth', (coll)=> {
     let arr;
@@ -1618,9 +1943,9 @@ function setupBuiltins(env){
     else if(coll instanceof LSet) arr = [...coll.keys()];
     else if(coll instanceof Dict) arr = coll.keys().map(k => [k, coll.get(k)]);
     else return [];
-    for(let i = arr.length - 1; i > 0; i--){ const j = Math.floor(Math.random() * (i + 1)); const t = arr[i]; arr[i] = arr[j]; arr[j] = t; }
+    for(let i = arr.length - 1; i > 0; i--){ const j = Math.floor(_sibilantRand() * (i + 1)); const t = arr[i]; arr[i] = arr[j]; arr[j] = t; }
     return arr;
-  }, '随机重排集合(返回新列表，不改原集合)：(shuffle coll) 对 list/set/dict 做 Fisher–Yates 洗牌。例 (shuffle (list 1 2 3)) 为 (1 2 3) 的某种排列');
+  }, '随机重排集合(返回新列表，不改原集合)：(shuffle coll) 对 list/set/dict 做 Fisher–Yates 洗牌；seed-rand 后可复现。例 (shuffle (list 1 2 3)) 为 (1 2 3) 的某种排列');
   def('repeatedly', (n, f)=> {
     const k = Math.max(0, n|0); const out = [];
     for(let i = 0; i < k; i++) out.push(applyFn(f, [], null));
@@ -1811,7 +2136,7 @@ function setupBuiltins(env){
     let acc = l[0];
     for(let i=1;i<l.length;i++) acc = applyFn(f, [acc, l[i]]);
     return acc;
-  }, '从左折叠，首元素作初始累加值(空列表返回 ())。例 (foldl1 + (list 1 2 3 4)) => 10');
+  }, '从左折叠，首元素作初始累加值(空列表返回 null)。例 (foldl1 + (list 1 2 3 4)) => 10');
   def('foldr1', (f, l)=>{
     if(!Array.isArray(l) || l.length === 0) return null;
     let acc = l[l.length - 1];
@@ -1875,6 +2200,47 @@ function setupBuiltins(env){
     }
     return r;
   });
+  // ---- ci438 新增：惰性序列 生成与变换（R1 全新能力；此前仅能手动 lazy-cons，缺 map/filter/生成器）----
+  function lazyIterate(f, v){ return new LStream(v, ()=> lazyIterate(f, applyFn(f, [v]))); }
+  function lazyRepeat(x){ return new LStream(x, ()=> lazyRepeat(x)); }
+  function lazyCycle(coll){
+    if(!Array.isArray(coll) || coll.length === 0) return null;
+    let i = 0; const gen = ()=> { const v = coll[i % coll.length]; i++; return new LStream(v, gen); };
+    return gen();
+  }
+  def('lazy-iterate', (f, init)=> lazyIterate(f, init), '惰性生成无限序列：init, f(init), f(f(init))… 例 (lazy-take 3 (lazy-iterate (lambda (x)(+ x 1)) 0)) => (0 1 2)');
+  def('lazy-repeat', (x)=> lazyRepeat(x), '惰性重复单值无限序列。例 (lazy-take 3 (lazy-repeat 7)) => (7 7 7)');
+  def('lazy-cycle', (c)=> lazyCycle(Array.isArray(c) ? c : [c]), '惰性循环遍历集合（到尾回到头）。例 (lazy-take 5 (lazy-cycle (list 1 2 3))) => (1 2 3 1 2)');
+  def('lazy-map', (f, s)=> {
+    const step = (st)=> {
+      if(st === null || (Array.isArray(st) && st.length === 0)) return null;
+      const h = (st instanceof LStream) ? st.head : st[0];
+      const rest = ()=> step((st instanceof LStream) ? forcePromise(st.tail) : st.slice(1));
+      return new LStream(applyFn(f, [h]), rest);
+    };
+    return step(s);
+  }, '惰性映射：返回对每个元素应用 f 后的新惰性序列（不立即求值）。例 (lazy-take 3 (lazy-map (lambda (x)(* x 2)) (lazy-repeat 1))) => (2 2 2)');
+  def('lazy-filter', (pred, s)=> {
+    const step = (st)=> {
+      while(st !== null && !(Array.isArray(st) && st.length === 0)){
+        const cur = (st instanceof LStream) ? st.head : st[0];
+        const rest = ()=> step((st instanceof LStream) ? forcePromise(st.tail) : st.slice(1));
+        if(applyFn(pred, [cur])) return new LStream(cur, rest);
+        st = rest();
+      }
+      return null;
+    };
+    return step(s);
+  }, '惰性过滤：保留谓词为真的元素（维持惰性）。例 (lazy-take 2 (lazy-filter odd? (lazy-iterate (lambda (x)(+ x 1)) 0))) => (1 3)');
+  def('lazy-nth', (n, s)=> {
+    let cur = s, k = 0;
+    while(cur !== null && !(Array.isArray(cur) && cur.length === 0)){
+      if(k === n) return (cur instanceof LStream) ? cur.head : cur[0];
+      cur = (cur instanceof LStream) ? forcePromise(cur.tail) : cur.slice(1);
+      k++;
+    }
+    return null;
+  }, '惰性取第 n 个元素（0 基，不强制整条序列）。例 (lazy-nth 4 (lazy-iterate (lambda (x)(+ x 1)) 0)) => 4');
 
   // ---- 元编程 / 错误 ----
   def('eval', (x)=> {
@@ -1885,8 +2251,8 @@ function setupBuiltins(env){
       return r;
     }
     return resolveTail(ev(x, newEnv(), true));
-  });
-  def('error', (msg)=> { throw lispError(typeof msg === 'string' ? msg : lispStr(msg)); });
+  }, '求值表达式（运行时反射）：(eval x) 若 x 是字符串则解析并在全新环境中运行，否则直接求值 x；返回结果。例 (eval "(+ 1 2)") => 3');
+  def('error', (msg)=> { throw lispError(typeof msg === 'string' ? msg : lispStr(msg)); }, '抛出一个 Lisp 错误（中断执行）：(error "msg") 以给定消息触发可捕获的运行时错误。例 (try (error "boom") (lambda (e) "caught")) => "caught"');
 
   // ---- Node 文件 IO / 进程（浏览器环境降级为“不支持”）----
   def('argv', ()=> (typeof process !== 'undefined' && process.argv) ? process.argv.slice(2).map(String) : []);
@@ -2243,6 +2609,153 @@ function setupBuiltins(env){
   def('json-stringify', (v)=> { try { return JSON.stringify(jsonEnc(v)); } catch(e){ return null; } }, 'JSON 序列化(容错)：(json-stringify v) 把 Sibilant 值编码为 JSON 字符串；编码失败返回 null。例 (json-stringify (list 1 2)) => "[1,2]"');
   def('slurp', (p)=> { const R = (typeof require === 'function') ? require : (typeof globalThis !== 'undefined' ? globalThis.require : undefined); if(typeof R !== 'function') return null; try { return R('fs').readFileSync(String(p), 'utf8'); } catch(e){ return null; } }, '读文件为字符串(容错)：(slurp p) 读取文本文件内容；文件不存在/不可读时返回 null（比 read-file 更宽容）。例 (> (string-length (slurp "interpreter.js")) 0) => #t');
 
+  // ===== 自驱循环新增内置（ci399 ~ ci415）=====
+  // ---- ci399 随机/概率批：rand-choice / seed-rand（rand / rand-int / shuffle 已存在并路由到可种子化 RNG）----
+  def('rand-choice', (coll)=> {
+    let arr;
+    if(Array.isArray(coll)) arr = coll;
+    else if(coll instanceof LSet) arr = [...coll.keys()];
+    else if(coll instanceof Dict) arr = coll.keys().map(k => [k, coll.get(k)]);
+    else return null;
+    if(arr.length === 0) return null;
+    return arr[Math.floor(_sibilantRand() * arr.length)];
+  }, '从集合中随机取一个元素（与 rand-nth 同义，强调“按概率选择”）：(rand-choice coll) 对 list/set/dict 随机返回其中之一，空集合返回 null。例 (rand-choice (list 1 2 3)) 落在 1/2/3 之一');
+  def('seed-rand', (s)=> {
+    const x = (s == null) ? (Date.now() >>> 0) : (Number(s) | 0);
+    _rngState = _mulberry32(x);
+    return x;
+  }, '设置随机数种子（可复现）：(seed-rand n) 用 32 位整数种子初始化内部 PRNG，此后 rand / rand-int / rand-choice / shuffle 序列固定可复现；无参则用时间种子。例 (seed-rand 42) 后连续 (rand-int 100) 稳定不变');
+
+  // ---- ci403 矩阵批：matrix / matrix-get / matrix-set / matrix-map / matrix-transpose / matrix-mul ----
+  def('matrix', (rows)=> {
+    if(!Array.isArray(rows)) return [];
+    return rows.map(r => Array.isArray(r) ? r.slice() : [r]);
+  }, '由行列表构造 2D 矩阵：(matrix rows) rows 为“行向量”的列表；非数组元素自动包成单行。例 (matrix (list (list 1 2) (list 3 4))) => ((1 2) (3 4))');
+  def('matrix-get', (m, i, j)=> {
+    if(!Array.isArray(m) || i < 0 || j < 0) return null;
+    const row = m[i];
+    return Array.isArray(row) ? (j < row.length ? row[j] : null) : null;
+  }, '取矩阵元素：(matrix-get m i j) 返回第 i 行第 j 列（0 基）；越界返回 null。例 (matrix-get (matrix (list (list 1 2) (list 3 4))) 1 0) => 3');
+  def('matrix-set', (m, i, j, v)=> {
+    if(!Array.isArray(m)) return [];
+    const out = m.map(r => Array.isArray(r) ? r.slice() : [r]);
+    if(i < 0 || j < 0 || i >= out.length) return out;
+    if(!Array.isArray(out[i])) out[i] = [];
+    // 补齐该行长度以免稀疏
+    while(out[i].length <= j) out[i].push(null);
+    out[i][j] = v;
+    return out;
+  }, '设置矩阵元素（返回新矩阵，不改原矩阵）：(matrix-set m i j v)。例 (matrix-get (matrix-set (matrix (list (list 1 2))) 0 1 9) 0 1) => 9');
+  def('matrix-map', (f, m)=> {
+    if(!Array.isArray(m)) return [];
+    return m.map(r => Array.isArray(r) ? r.map(x => applyFn(f, [x])) : applyFn(f, [r]));
+  }, '逐元素映射：(matrix-map f m) 对矩阵每个元素调用 f 得到同形新矩阵。例 (matrix-map (lambda (x) (* x 2)) (matrix (list (list 1 2) (list 3 4)))) => ((2 4) (6 8))');
+  def('matrix-transpose', (m)=> {
+    if(!Array.isArray(m) || m.length === 0) return [];
+    const rows = m.map(r => Array.isArray(r) ? r : [r]);
+    const ncols = Math.max(...rows.map(r => r.length));
+    const out = [];
+    for(let c = 0; c < ncols; c++){ const col = []; for(const r of rows) col.push(r[c] ?? null); out.push(col); }
+    return out;
+  }, '矩阵转置：(matrix-transpose m) 行列互换；非矩形缺位补 null。例 (matrix-transpose (matrix (list (list 1 2) (list 3 4)))) => ((1 3) (2 4))');
+  def('matrix-mul', (a, b)=> {
+    if(!Array.isArray(a) || !Array.isArray(b) || a.length === 0 || b.length === 0) return null;
+    const A = a.map(r => Array.isArray(r) ? r : [r]);
+    const B = b.map(r => Array.isArray(r) ? r : [r]);
+    const n = A.length, m = B.length;
+    const k = B[0].length;
+    if(k === 0) return null;
+    // 维度校验：A 的列数须等于 B 的行数
+    for(const row of A){ if(row.length !== m) return null; }
+    const out = [];
+    for(let i = 0; i < n; i++){
+      const orow = [];
+      for(let j = 0; j < k; j++){
+        let s = 0;
+        for(let t = 0; t < m; t++) s += Number(A[i][t] || 0) * Number(B[t][j] || 0);
+        orow.push(s);
+      }
+      out.push(orow);
+    }
+    return out;
+  }, '矩阵乘法（2D，行×列）：(matrix-mul A B) 当 A 为 p×m、B 为 m×n 时返回 p×n 矩阵；维度不符返回 null。例 (matrix-mul (matrix (list (list 1 2) (list 3 4))) (matrix (list (list 5 6) (list 7 8)))) => ((19 22) (43 50))');
+
+  // ---- ci407 聚合/折叠批：reduce-right / split-by（reduce / foldl1 / foldr1 / count-where 已存在；partition 已被 chunk 占用故用 split-by）----
+  def('reduce-right', (f, init, l)=> {
+    if(!Array.isArray(l)) return init;
+    let acc = init;
+    for(let i = l.length - 1; i >= 0; i--) acc = applyFn(f, [l[i], acc]);
+    return acc;
+  }, '从右折叠：(reduce-right f init xs) 从列表末尾向前用 f 累积（f 接收 (元素 累加值)），非列表返回 init。例 (reduce-right (lambda (x a) (cons x a)) (list) (list 1 2 3)) => (1 2 3)');
+  def('split-by', (pred, l)=> {
+    if(!Array.isArray(l)) return [[] , []];
+    const yes = [], no = [];
+    for(const x of l){ if(applyFn(pred, [x]) !== false && applyFn(pred, [x]) !== null) yes.push(x); else no.push(x); }
+    return [yes, no];
+  }, '按谓词把列表分为两组（命中 / 未命中）：(split-by pred xs) 返回 (list 命中列表 未命中列表)；非列表返回 (( ) ( ))。例 (split-by even? (list 1 2 3 4)) => ((2 4) (1 3))');
+
+  // ---- ci411 并发/异步批：async / await-promise / sleep / promise-all / go（基于原生 Promise，不破坏同步语义）----
+  // 注意：delay / await 已被惰性求值原语（LPromise）占用，故 JS Promise 版改名为 sleep / await-promise。
+  def('async', (f)=> {
+    const callable = (typeof f === 'function') || (f && (f.__lambda || f.__macro));
+    return Promise.resolve().then(()=> callable ? applyFn(f, []) : f);
+  }, '把函数/无参 thunk（含 Sibilant lambda）包装为 JS Promise：(async f) 异步执行可调用对象 f 并返回其结果的 Promise；非可调用值（如数字）直接 Promise.resolve。例 (await-promise (async (lambda () (+ 1 2)))) => 3、(await-promise (async 7)) => 7');
+  def('await-promise', (p)=> {
+    if(p && typeof p.then === 'function') return p;
+    return Promise.resolve(p);
+  }, '等待一个 JS Promise（反射/异步）：(await-promise p) 若 p 为 thenable 则原样返回（交由 JS 的 await 解包），否则包成已决议的 Promise；不与惰性原语 await 冲突。例 (await-promise (sleep 10 42)) 在 JS 中 await 后为 42');
+  def('sleep', (ms, val)=> { return new Promise(res => setTimeout(()=> res(val), Math.max(0, Number(ms) || 0))); }, '延迟 ms 毫秒后决议为 val 的 JS Promise：(sleep ms val)；与惰性原语 delay 区分而改名。例 (await-promise (sleep 5 "done")) => "done"');
+  def('promise-all', (ps)=> {
+    if(!Array.isArray(ps)) return Promise.resolve([]);
+    return Promise.all(ps.map(p => (p && typeof p.then === 'function') ? p : Promise.resolve(p)));
+  }, '聚合多个 Promise：(promise-all list-of-promises) 返回当全部完成才决议的 Promise（结果为各值的列表）。例 (await-promise (promise-all (list (sleep 5 1) (sleep 5 2)))) => (1 2)');
+  def('go', (f)=> {
+    const callable = (typeof f === 'function') || (f && (f.__lambda || f.__macro));
+    return Promise.resolve().then(()=> callable ? applyFn(f, []) : f);
+  }, '轻量并发：立即异步派发可调用对象 f 并返回其 JS Promise（等价于 (async f)），便于 (promise-all (list (go f1) (go f2))) 并发收集结果');
+
+  // ---- ci415 反射/元批：eval-expr / apply-fn / type-of / arity / doc-of（eval / apply / doc 已存在，这里提供别名/补充）----
+  def('eval-expr', (x)=> {
+    if(typeof x === 'string'){
+      const exprs = parseAll(x); let r = null;
+      const e = newEnv();
+      for(const ex of exprs) r = resolveTail(ev(ex, e, true));
+      return r;
+    }
+    return resolveTail(ev(x, newEnv(), true));
+  }, '求值表达式字符串（反射）：(eval-expr "expr") 解析并运行字符串中的 Sibilant 表达式，返回结果；非字符串则直接求值。例 (eval-expr "(+ 1 2)") => 3');
+  def('apply-fn', (f, l)=> {
+    if(!Array.isArray(l)) throw lispError('apply-fn 期望参数列表作为第二参数，得到: ' + lispStr(l));
+    return applyFn(f, l);
+  }, '把函数应用到参数列表：(apply-fn f (list a b …)) 等价于 (f a b …)；第二参数必须是列表。例 (apply-fn + (list 1 2 3)) => 6');
+  def('type-of', (x)=> {
+    if(x === null) return 'null';
+    if(x === true || x === false) return 'boolean';
+    if(typeof x === 'number') return 'number';
+    if(typeof x === 'string') return 'string';
+    if(x && x.__lambda) return 'lambda';
+    if(x && x.__macro) return 'macro';
+    if(typeof x === 'function') return 'function';
+    if(Array.isArray(x)) return 'list';
+    if(x instanceof Dict) return 'dict';
+    if(x instanceof LSet) return 'set';
+    if(x instanceof Sym) return 'symbol';
+    return 'unknown';
+  }, '返回值的类型符号（字符串）：(type-of x) 对 数字/字符串/列表/字典/集合/布尔/函数/lambda/宏/符号 返回对应名字，null 返回 "null"。例 (type-of (list 1)) => "list"、(type-of 3) => "number"、(type-of (lambda (x) x)) => "lambda"');
+  def('arity', (f)=> {
+    if(typeof f === 'function') return f.__lambda ? (f.__lambda.rest ? -1 : f.params.length) : f.length;
+    if(f && f.__lambda) return f.rest ? -1 : (f.params ? f.params.length : 0);
+    return -1;
+  }, '返回函数参数个数：(arity f) 对 Sibilant lambda 返回固定参数个数（含 &rest 变参时返回 -1），对 JS 内置返回声明的 length。例 (arity (lambda (a b) b)) => 2');
+  def('doc-of', (f)=> {
+    if(typeof f === 'function') return f.__doc ?? null;
+    if(f && f.__lambda) return f.__doc ?? null;
+    const name = f instanceof Sym ? f.name : (typeof f === 'string' ? f : null);
+    if(name) return DOCS[name] ?? null;
+    return null;
+  }, '取函数/符号的文档字符串：(doc-of f) 优先读函数对象的 __doc，符号或字符串则查 DOCS 表；无则返回 null。例 (doc-of "rand") 返回 rand 的说明');
+
+
   }
 
 function lispStr(v){
@@ -2275,7 +2788,7 @@ const STDLIB = `
 (define butlast (lambda (xs) (if (null? (cdr xs)) (list) (cons (car xs) (butlast (cdr xs))))))
 (define remove (lambda (p xs) (filter (lambda (x) (not (p x))) xs)))
 (define zipmap (lambda (ks vs) (foldl (lambda (d kv) (dict-set d (car kv) (car (cdr kv)))) (dict) (zip ks vs))))
-(define frequencies (lambda (xs) (foldl (lambda (d x) (dict-set d x (+ (dict-get d x 0) 1))) (dict) xs)))
+;; frequencies 已由 builtin def 提供单一真相源(ci441 消除预置库重复定义)
 (define interpose (lambda (sep xs) (if (or (null? xs) (null? (cdr xs))) xs (cons (car xs) (cons sep (interpose sep (cdr xs)))))))
 (define member? (lambda (x xs) (if (null? xs) #f (if (equal? x (car xs)) #t (member? x (cdr xs))))))
 (define distinct (lambda (xs) (foldl (lambda (acc x) (if (member? x acc) acc (append acc (list x)))) (list) xs)))

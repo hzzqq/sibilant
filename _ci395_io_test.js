@@ -26,9 +26,11 @@ function ok(name, cond) { if (cond) { pass++; } else { fail++; console.error(`FA
 function run(src) { return S.run(src); }
 
 const TMP = path.join(__dirname, 'test_ci395_tmp.txt');
+// 用绝对路径读取解释器源码，使测试无论从仓库根还是 lang/ 目录运行都能解析到 lang/interpreter.js
+const INTERP = path.join(__dirname, 'interpreter.js').replace(/\\/g, '/');
 
 // ---------- read-file / write-file（已存在）----------
-ok('read-file interpreter.js 非空', (() => { const s = run('(read-file "interpreter.js")'); return typeof s === 'string' && s.length > 0; })());
+ok('read-file interpreter.js 非空', (() => { const s = run(`(read-file "${INTERP}")`); return typeof s === 'string' && s.length > 0; })());
 eq('write-file 返回 null', run(`(write-file "${TMP.replace(/\\/g, '/')}" "hello-ci395")`), null);
 eq('write-file 后可 read-file', run(`(read-file "${TMP.replace(/\\/g, '/')}")`), 'hello-ci395');
 
@@ -45,7 +47,7 @@ ok('json-stringify 非法 -> null', run('(json-stringify (lambda(x) x))') === nu
 eq('json 往返', run('(json-stringify (json-parse "{\\"a\\":[1,2]}"))'), '{"a":[1,2]}');
 
 // ---------- slurp（新增，容错）----------
-ok('slurp interpreter.js 非空', (() => { const s = run('(slurp "interpreter.js")'); return typeof s === 'string' && s.length > 0; })());
+ok('slurp interpreter.js 非空', (() => { const s = run(`(slurp "${INTERP}")`); return typeof s === 'string' && s.length > 0; })());
 ok('slurp 不存在 -> null', run('(slurp "no_such_file_ci395.txt")') === null);
 
 // ---------- 隐性修复验证：read-file / write-file 文档 ----------
