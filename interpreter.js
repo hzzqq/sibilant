@@ -12,12 +12,12 @@ class Dict {
   _clone(){ const d = new Dict(); for(const [sk, e] of this.store) d.store.set(sk, e); return d; }
   put(k, v, mutate){
     const d = mutate ? this : this._clone();
-    d.store.set(lispStr(k), { k, v });
+    d.store.set(keyOf(k), { k, v });
     return d;
   }
-  get(k){ const e = this.store.get(lispStr(k)); return e ? e.v : undefined; }
-  has(k){ return this.store.has(lispStr(k)); }
-  del(k){ const d = this._clone(); d.store.delete(lispStr(k)); return d; }
+  get(k){ const e = this.store.get(keyOf(k)); return e ? e.v : undefined; }
+  has(k){ return this.store.has(keyOf(k)); }
+  del(k){ const d = this._clone(); d.store.delete(keyOf(k)); return d; }
   keys(){ const r = []; for(const e of this.store.values()) r.push(e.k); return r; }
   vals(){ const r = []; for(const e of this.store.values()) r.push(e.v); return r; }
   get len(){ return this.store.size; }
@@ -27,9 +27,9 @@ class Dict {
 class LSet {
   constructor(){ this.m = new Map(); }
   _clone(){ const s = new LSet(); for(const [k, v] of this.m) s.m.set(k, v); return s; }
-  add(v, mutate){ const s = mutate ? this : this._clone(); s.m.set(lispStr(v), v); return s; }
-  has(v){ return this.m.has(lispStr(v)); }
-  del(v){ const s = this._clone(); s.m.delete(lispStr(v)); return s; }
+  add(v, mutate){ const s = mutate ? this : this._clone(); s.m.set(keyOf(v), v); return s; }
+  has(v){ return this.m.has(keyOf(v)); }
+  del(v){ const s = this._clone(); s.m.delete(keyOf(v)); return s; }
   get len(){ return this.m.size; }
   keys(){ return [...this.m.values()]; }
 }
@@ -123,11 +123,24 @@ function tokenize(src){
       continue;
     }
     if(c === '"'){
-      let j = i+1, s = '';
-      while(j < n && src[j] !== '"'){
-        if(src[j] === '\\' && j+1 < n){ s += src[j+1]; j += 2; }
+      const openLine = curLine;
+      let j = i+1, s = '', closed = false;
+      while(j < n){
+        if(src[j] === '"'){ closed = true; break; }
+        if(src[j] === '\\' && j+1 < n){
+          const e = src[j+1];
+          if(e === 'n') s += '\n';
+          else if(e === 't') s += '\t';
+          else if(e === 'r') s += '\r';
+          else if(e === '\\') s += '\\';
+          else if(e === '"') s += '"';
+          else s += '\\' + e;                 // 未知转义保留反斜杠（如正则 \d、\w 可直接书写）
+          if(e === '\n') curLine++;           // 反斜杠+真实换行：行号照常推进
+          j += 2;
+        }
         else { if(src[j] === '\n') curLine++; s += src[j]; j++; }
       }
+      if(!closed) throw lispError('未闭合的字符串（起于此行的 " 没有配对）', openLine);
       out.push('"' + s + '"'); lines.push(curLine); i = j+1; continue;
     }
     if(c === "'"){ out.push("'"); lines.push(curLine); i++; continue; }
@@ -2763,7 +2776,8 @@ function lispStr(v){
   if(v === true) return '#t';
   if(v === false) return '#f';
   if(typeof v === 'number') return String(v);
-  if(typeof v === 'string') return '"' + v + '"';
+  if(typeof v === 'string') return '"' + v.replace(/\\/g, '\\\\').replace(/"/g, '\\"')
+    .replace(/\n/g, '\\n').replace(/\t/g, '\\t').replace(/\r/g, '\\r') + '"';   // ci463: 读-打印往返（含引号/换行的字符串可重新 parse）
   if(v instanceof Sym) return v.name;
   if(Array.isArray(v)) return '(' + v.map(lispStr).join(' ') + ')';
   if(typeof v === 'function') return '#<builtin>';
@@ -2775,6 +2789,15 @@ function lispStr(v){
   if(v instanceof LStream) return '#<lazy-list>';
   if(v instanceof LTree) return '#tree(' + lispStr(v.value) + (v.children.length ? ' ' + v.children.map(lispStr).join(' ') : '') + ')';
   return String(v);
+}
+// 字典/集合的键归一化（区别于 lispStr 的「展示」用途）：符号与同名字符串映射到同一存储键，
+// 使 (dict 'a 1) 与 (dict-get d "a") / JSON 往返后 (dict-get (json-parse ...) 'a) 行为一致。
+// ci459 修复：原 Dict/LSet 直接复用 lispStr 作存储键，而 lispStr 对字符串加引号，
+// 导致 JSON 反序列化的字符串键与符号键无法匹配（dict-get 返回 null）——一类静默的互操作 bug。
+function keyOf(k){
+  if(k instanceof Sym) return k.name;
+  if(typeof k === 'string') return k;
+  return lispStr(k);
 }
 
 // ---- 标准库（每次 newEnv 自动加载，使用语言自身编写，浏览器/Node 通用）----
