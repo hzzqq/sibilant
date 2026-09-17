@@ -1263,6 +1263,7 @@ function setupBuiltins(env){
     return lispStr(x);
   }
   def('str', (...args)=> args.map(_strOf).join(''), '将任意参数拼接为字符串：nil 视为空串、布尔转 true/false、列表/字典/集合递归展开。例 (str "a" 1 (list 2 3)) => "a123"。');
+  def('lispStr', lispStr, '将任意 Sibilant 值转为可打印字符串（含引号、列表、字典等）。例 (lispStr 5) => "5"、(lispStr "a") => "\"a\""、(lispStr (list 1 2)) => "(1 2)"。');
   // ---- 可变状态原子（atom / deref / reset! / swap!）----
   def('atom', (v)=> new Atom(v), '创建可变状态原子(atom)，初始值为 v(nil 则取 null)。deref 取当前值、reset! 设值、swap! 以函数更新。例 (def a (atom 0)) (swap! a + 1) => 1。');
   def('deref', (a)=> (a instanceof Atom) ? a.value : (function(){ throw lispError('deref 需要 atom'); })(), '取原子当前值。');

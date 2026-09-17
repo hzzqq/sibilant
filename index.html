@@ -2,6 +2,7 @@
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Sibilant · 自研 Lisp 解释器 REPL</title>
 <style>
   :root{ --bg:#0a0c10; --panel:#0e1118; --line:#1f2730; --txt:#cdd6e0; --accent:#c792ea; --num:#f78c6c; --str:#c3e88d; }
@@ -16,8 +17,11 @@
   #side button{width:100%;text-align:left;background:#141a22;color:var(--txt);border:1px solid var(--line);
     border-radius:6px;padding:8px 10px;font:inherit;cursor:pointer;margin-bottom:8px;transition:.15s;font-size:12px;}
   #side button:hover{border-color:var(--accent);color:var(--accent);}
-  #repl{flex:1;display:flex;flex-direction:column;}
-  #out{flex:1;overflow-y:auto;padding:16px 20px;font-size:14px;line-height:1.7;}
+  #repl{flex:1;display:flex;flex-direction:column;min-width:0;}
+  #toolbar{display:flex;justify-content:flex-end;gap:8px;padding:8px 12px;border-bottom:1px solid var(--line);background:#0e1116;}
+  #toolbar button{padding:4px 10px;font-size:12px;background:#1b212b;border:1px solid var(--line);border-radius:6px;color:var(--txt);cursor:pointer;}
+  #toolbar button:hover{border-color:var(--accent);}
+  #out{flex:1;overflow-y:auto;padding:16px 24px;font-size:14px;line-height:1.7;}
   #out .line{white-space:pre-wrap;word-break:break-word;}
   #out .in{color:#6b7888;}
   #out .in b{color:var(--accent);}
@@ -47,7 +51,7 @@
     <button data-ex="(defmacro when (test & body) `(if ,test (begin ,@body)))\n(define x 7)\n(when (> x 3) (print &quot;x 大于 3&quot;) 'yes)">宏 · when (quasiquote)</button>
     <button data-ex="(define (sum n acc) (if (= n 0) acc (sum (- n 1) (+ acc n))))\n(sum 100000 0)">尾递归 · 十万次累加</button>
     <button data-ex="(define (a x) (+ 0 (b x)))\n(define (b x) (+ 0 (c x)))\n(define (c x) (oops x))\n(a 5)">错误回溯 · 调用栈</button>
-    <button data-ex="(define f (x) (+ x 1))\n(f y)">错误定位 · 行号+源码片段</button>
+    <button data-ex="(define (f x) (+ x 1))\n(f y)">错误定位 · 行号+源码片段</button>
     <button data-ex="(try (/ 1 0) (catch e (string-append &quot;出错: &quot; e)))">异常处理 · try/catch</button>
     <button data-ex="(eval &quot;(define (sq x) (* x x)) (sq 9)&quot;)">元编程 · eval</button>
     <button data-ex="(define r 5)\n(string-append &quot;半径&quot; (substring (string-append (lispStr r) &quot;&quot;) 0 99) &quot; 的圆面积≈&quot; (substring (string-append (lispStr (round (* pi r r))) &quot;&quot;) 0 99))">数学 · 字符串拼接</button>
@@ -63,6 +67,7 @@
     </div>
   </div>
   <div id="repl">
+    <div id="toolbar"><button id="clearOut" title="Ctrl+L 清空输出">清空输出</button></div>
     <div id="out"></div>
     <div id="inputbar">
       <span class="prompt">&gt;</span>
@@ -95,6 +100,10 @@ function evaluate(src){
     print('<span class="err">⚠ ' + esc(e.message) + '</span>');
   }
 }
+function clearOut(){
+  out.innerHTML = '';
+  print('<span class="in"><b>Sibilant</b> 输出已清空。</span>');
+}
 
 code.addEventListener('keydown', e=>{
   if(e.key === 'Enter' && !e.shiftKey){
@@ -112,18 +121,25 @@ code.addEventListener('keydown', e=>{
     if(hIdx < history.length-1){ hIdx++; code.value = history[hIdx]; }
     else { hIdx = history.length; code.value = ''; }
     e.preventDefault();
+  } else if(e.key.toLowerCase() === 'l' && e.ctrlKey){
+    e.preventDefault();
+    clearOut();
   }
 });
+
+document.getElementById('clearOut').addEventListener('click', clearOut);
 code.addEventListener('input', ()=>{
   code.style.height = '38px';
   code.style.height = Math.min(code.scrollHeight, 160) + 'px';
 });
 
 document.querySelectorAll('[data-ex]').forEach(b=>{
-  b.onclick = ()=>{ evaluate(b.dataset.ex); };
+  b.onclick = ()=>{ evaluate(b.dataset.ex.replace(/\\n/g, '\n')); };
 });
 
 print('<span class="in"><b>Sibilant</b> 已就绪。试着点左侧示例，或自己写点东西。</span>');
 </script>
+<script src="./help.js"></script>
+<script src="./settings.js"></script>
 </body>
 </html>
