@@ -370,9 +370,61 @@ function bindDestruct(pat, val, ne){
 // 把 AST 中所有与 sym 同名的符号替换为 val（as-> 占位符展开用）
 function QQ(v){ return [new Sym('quote'), v]; }
 function substSym(form, sym, val){
-  if(form instanceof Sym) return (form.name === sym.name) ? QQ(val) : form;
+  if(form instanceof Sym) return form.name === sym.name ? val : form;
   if(Array.isArray(form)){ const r = []; for(const e of form) r.push(substSym(e, sym, val)); r.line = form.line; return r; }
   return form;
+}
+
+// ---------- 模块系统（defmodule / require / provide）----------
+// 两种模块定义方式：
+//   ① (defmodule 名 (export a b) …) —— 内联定义，导出即时写入 modules 表（同步，不走缓存/加载流程）。
+//   ② 外部源 —— registerModule 注册的内联注册表（浏览器 <script type="text/x-sibilant">），
+//      或 setModuleLoader 注入的自定义加载器 fn(name)->src（Node/测试用，优先于注册表）。
+// 外部模块在独立 env 中延迟执行一次（define 不泄漏，builtins/stdlib 经根环境仍可见），
+// 用 (provide a b) 声明导出名，require 时把导出符号注入调用方 env；
+// 同名模块只执行一次（缓存），循环依赖报错，顶层错误就地标注 [模块: 名]。
+const MODULES = {
+  registry: new Map(),   // name -> src（registerModule 注册的源码）
+  cache: new Map(),      // name -> exports（外部加载名单，供 clearModuleCache 从 modules 删除）
+  loading: new Set(),    // 执行中的模块名（循环依赖检测）
+  loader: null           // fn(name) -> src | null
+};
+function rootEnvOf(env){ let e = env; while(e.parent) e = e.parent; return e; }
+function loadExternalModule(name, env, node){
+  if(modules[name]) return;                        // 已加载（含 defmodule 内联定义）→ 直接命中
+  if(MODULES.loading.has(name)) throw lispError('循环依赖: ' + name, node);
+  let src = null;
+  if(MODULES.loader) src = MODULES.loader(name);   // 加载器优先
+  if(src == null) src = MODULES.registry.get(name) || null;  // 注册表兜底
+  if(src == null) return;                          // 找不到源码 → 交回 require 报「未定义模块」
+  MODULES.loading.add(name);
+  const prevFile = activeFile;
+  activeFile = null;                               // 模块内错误不标 [文件: …]，统一由下方标 [模块: 名]
+  try{
+    const me = makeEnv(rootEnvOf(env));
+    for(const ex of parseAll(src)) ev(ex, me, true);
+    const mod = {};
+    for(const n of (me.__exports || [])){
+      if(me.vars[n] !== undefined) mod[n] = me.vars[n];
+    }
+    modules[name] = mod;
+    MODULES.cache.set(name, mod);
+  } catch(err){
+    if(err && err.lisp && !err.modTagged){         // modTagged 防嵌套 require 重复标注
+      err.modTagged = true;
+      let msg = '[模块: ' + name + '] ' + err.message;
+      if(err.line != null){
+        const snip = srcLineAt(src, err.line);
+        msg = '【行 ' + err.line + '】' + msg + (snip ? '\n    > ' + snip : '');
+        delete err.line;                           // 防外层 run 用调用方源码错位回显
+      }
+      err.message = msg;
+    }
+    throw err;
+  } finally {
+    activeFile = prevFile;
+    MODULES.loading.delete(name);
+  }
 }
 
 function ev(node, env, tail){
@@ -406,6 +458,14 @@ function ev(node, env, tail){
         let r = null;
         for(let i=0;i<exprs.length;i++) r = resolveTail(ev(exprs[i], env, i === exprs.length-1 ? tail : false));
         return r;
+      }
+      case 'provide': {   // (provide 名1 名2 …)：声明当前模块的导出符号（外部源模块用；defmodule 走 export 列表）
+        const ex = env.__exports || (env.__exports = []);
+        for(const s of node.slice(1)){
+          if(!(s instanceof Sym)) throw lispError('provide 参数须为符号', node);
+          if(!ex.includes(s.name)) ex.push(s.name);
+        }
+        return null;
       }
       case 'if': {
         const t = ev(node[1], env, false);
@@ -839,11 +899,14 @@ function ev(node, env, tail){
         modules[mname] = mod;
         return new Sym(mname);
       }
-      case 'require': {
-        const mname = node[1].name;
+      case 'require': {   // (require 模块名 [挑选符号…])：导出符号注入调用方 env；模块名支持符号/字符串双形态
+        const mname = node[1] instanceof Sym ? node[1].name : String(ev(node[1], env, false));
+        if(!modules[mname]) loadExternalModule(mname, env, node);   // modules 表未命中 → 尝试外部源
         const mod = modules[mname];
         if(!mod) throw lispError('未定义模块: ' + mname, node);
-        const picks = node.length > 2 ? node.slice(2).map(s => s.name) : Object.keys(mod);
+        const picks = node.length > 2
+          ? node.slice(2).map(s => s instanceof Sym ? s.name : String(ev(s, env, false)))
+          : Object.keys(mod);
         for(const s of picks){
           if(!(s in mod)) throw lispError('模块 ' + mname + ' 未导出: ' + s, node);
           envSet(env, s, mod[s]);
@@ -2854,4 +2917,11 @@ function run(src, env, filename){
   return r;
 }
 
-window.Sibilant = { tokenize, parseAll, ev, run, newEnv, lispStr, Sym, qq };
+window.Sibilant = { tokenize, parseAll, ev, run, newEnv, lispStr, Sym, qq,
+  registerModule: (name, src)=> MODULES.registry.set(String(name), String(src)),
+  setModuleLoader: fn => { MODULES.loader = (typeof fn === 'function') ? fn : null; },
+  clearModuleCache: ()=> {   // 仅清除外部加载的模块（defmodule 内联定义不受影响），支持源码变更后重载
+    for(const n of MODULES.cache.keys()) delete modules[n];
+    MODULES.cache.clear();
+    MODULES.loading.clear();
+  } };

@@ -54,6 +54,7 @@
     <button data-ex="(define (f x) (+ x 1))\n(f y)">错误定位 · 行号+源码片段</button>
     <button data-ex="(try (/ 1 0) (catch e (string-append &quot;出错: &quot; e)))">异常处理 · try/catch</button>
     <button data-ex="(eval &quot;(define (sq x) (* x x)) (sq 9)&quot;)">元编程 · eval</button>
+    <button data-ex="(require &quot;mathx&quot;)\n(clamp 9 0 5)">模块 · require 导入</button>
     <button data-ex="(define r 5)\n(string-append &quot;半径&quot; (substring (string-append (lispStr r) &quot;&quot;) 0 99) &quot; 的圆面积≈&quot; (substring (string-append (lispStr (round (* pi r r))) &quot;&quot;) 0 99))">数学 · 字符串拼接</button>
     <div class="hint">
       词法分析 → 递归下降解析 → 树遍历求值 + 闭包作用域。<br>
@@ -76,11 +77,24 @@
   </div>
 </div>
 <script src="./interpreter.js"></script>
+<!-- 内嵌示例模块：REPL 中 (require "mathx") 后，导出的 clamp / lerp / sq 直接注入当前环境可用 -->
+<script type="text/x-sibilant" data-module="mathx">
+;; mathx.sibilant —— 数学扩展示例模块
+(define (clamp x lo hi) (min (max x lo) hi))
+(define (lerp a b t) (+ a (* (- b a) t)))
+(define (sq x) (* x x))
+(provide clamp lerp sq)
+</script>
 <script>
 const out = document.getElementById('out');
 const code = document.getElementById('code');
 const env = Sibilant.newEnv();
 const history = []; let hIdx = -1;
+
+// 自动注册内嵌模块：<script type="text/x-sibilant" data-module="名"> 源码 </script>
+for(const s of document.querySelectorAll('script[type="text/x-sibilant"][data-module]')){
+  Sibilant.registerModule(s.dataset.module, s.textContent);
+}
 
 function print(html, cls){
   const div = document.createElement('div');
