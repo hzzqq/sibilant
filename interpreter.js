@@ -42,6 +42,31 @@ class Atom {                                          // 可变状态原子：�
 class LTree {
   constructor(value, children){ this.value = value; this.children = children || []; }
 }
+// 堆（最小优先队列）：内部 1 层数组二叉堆 + 自定义比较器；不可变语义
+// （heap-push/heap-pop 返回新堆，原堆不变，与 LSet/Dict 持久化风格一致）。
+class LHeap {
+  constructor(arr, cmp){ this.arr = arr; this.cmp = cmp; }
+  get len(){ return this.arr.length; }
+  _clone(){ return new LHeap(this.arr.slice(), this.cmp); }
+}
+function heapCmpDefault(a, b){ return a < b ? -1 : (a > b ? 1 : 0); }
+function heapSiftUp(arr, i, cmp){
+  while(i > 0){
+    const p = (i - 1) >> 1;
+    if(cmp(arr[i], arr[p]) < 0){ const t = arr[i]; arr[i] = arr[p]; arr[p] = t; i = p; }
+    else break;
+  }
+}
+function heapSiftDown(arr, i, cmp){
+  const n = arr.length;
+  while(true){
+    const l = 2*i + 1, r = l + 1; let m = i;
+    if(l < n && cmp(arr[l], arr[m]) < 0) m = l;
+    if(r < n && cmp(arr[r], arr[m]) < 0) m = r;
+    if(m === i) break;
+    const t = arr[i]; arr[i] = arr[m]; arr[m] = t; i = m;
+  }
+}
 function treeMap(f, t){
   if(!(t instanceof LTree)) throw lispError('tree-map 需要 tree');
   const kids = t.children.map(c => treeMap(f, c));
@@ -1323,6 +1348,7 @@ function setupBuiltins(env){
     if(Array.isArray(x)) return x.map(_strOf).join('');
     if(x instanceof Dict) return '{' + x.keys().map((k,i)=> _strOf(k) + ' ' + _strOf(x.vals()[i])).join(', ') + '}';
     if(x instanceof LSet) return '#{' + x.keys().map(_strOf).join(' ') + '}';
+    if(x instanceof LHeap) return '#heap[' + x.arr.map(_strOf).join(' ') + ']';
     return lispStr(x);
   }
   def('str', (...args)=> args.map(_strOf).join(''), '将任意参数拼接为字符串：nil 视为空串、布尔转 true/false、列表/字典/集合递归展开。例 (str "a" 1 (list 2 3)) => "a123"。');
@@ -1389,6 +1415,46 @@ function setupBuiltins(env){
   def('tree-find', (pred, t)=> treeFind(pred, t));
   def('tree-depth', (t)=> treeDepth(t));
   def('tree-size', (t)=> treeSize(t));
+
+  // ---- 堆（最小优先队列 LHeap：自定义比较器，不可变 push/pop）----
+  def('heap-new', (...args)=>{
+    let cmp = heapCmpDefault;
+    if(args.length){
+      const last = args[args.length-1];
+      if(typeof last === 'function') cmp = args.pop();                       // 原生 JS 比较器
+      else if(last && last.__lambda) cmp = args.pop(), (c=> cmp = (a, b)=> applyFn(c, [a, b]))(last);   // Sibilant lambda 包装
+    }
+    const arr = [];
+    for(const v of args){ arr.push(v); heapSiftUp(arr, arr.length-1, cmp); }
+    return new LHeap(arr, cmp);
+  }, '新建最小堆：(heap-new 3 1 2) 或尾参传自定义比较函数 (heap-new ... (lambda (a b) (- b a)))。比较器返回负数表示 a 优先。');
+  def('heap?', (x)=> x instanceof LHeap);
+  def('heap-push', (h, v)=>{
+    if(!(h instanceof LHeap)) throw lispError('heap-push 需要 heap');
+    const nh = h._clone(); nh.arr.push(v); heapSiftUp(nh.arr, nh.arr.length-1, nh.cmp);
+    return nh;
+  }, '入堆：(heap-push h v) 返回新堆（不可变，原堆不变）。');
+  def('heap-peek', (h)=>{
+    if(!(h instanceof LHeap)) throw lispError('heap-peek 需要 heap');
+    if(!h.arr.length) throw lispError('heap-peek 空堆');
+    return h.arr[0];
+  }, '查看堆顶（最小元素，不移除）：空堆报错。');
+  def('heap-pop', (h)=>{
+    if(!(h instanceof LHeap)) throw lispError('heap-pop 需要 heap');
+    if(!h.arr.length) throw lispError('heap-pop 空堆');
+    const nh = h._clone();
+    const last = nh.arr.pop();
+    if(nh.arr.length){ nh.arr[0] = last; heapSiftDown(nh.arr, 0, nh.cmp); }
+    return nh;
+  }, '出堆：(heap-pop h) 返回移除堆顶后的新堆（不可变）；配合 heap-peek 使用。空堆报错。');
+  def('heap-size', (h)=> (h instanceof LHeap) ? h.len : 0);
+  def('heap-empty?', (h)=> (h instanceof LHeap) ? h.len === 0 : true);
+  def('heap-to-list', (h)=>{
+    if(!(h instanceof LHeap)) throw lispError('heap-to-list 需要 heap');
+    const nh = h._clone(); const out = [];
+    while(nh.arr.length){ out.push(nh.arr[0]); const last = nh.arr.pop(); if(nh.arr.length){ nh.arr[0] = last; heapSiftDown(nh.arr, 0, nh.cmp); } }
+    return out;
+  }, '按优先序升序弹出全部元素为列表（堆被复制，原堆不变）。例 (heap-to-list (heap-new 3 1 2)) => (1 2 3)');
 
   // ---- 通用树遍历/变换（作用于嵌套列表；dict/tree/原子不在内部展开）----
   def('postwalk', (f, x)=> {
@@ -2849,6 +2915,7 @@ function lispStr(v){
   if(v && v.__macro) return '#<macro>';
   if(v instanceof Dict) return '#{' + v.keys().map(k=> lispStr(k) + ' ' + lispStr(v.get(k))).join(' ') + '}';
   if(v instanceof LSet) return '#{' + v.keys().map(k=> lispStr(k)).join(' ') + '}';
+  if(v instanceof LHeap) return '#heap[' + v.arr.map(k=> lispStr(k)).join(' ') + ']';
   if(v instanceof LPromise) return '#<promise>';
   if(v instanceof LStream) return '#<lazy-list>';
   if(v instanceof LTree) return '#tree(' + lispStr(v.value) + (v.children.length ? ' ' + v.children.map(lispStr).join(' ') : '') + ')';
